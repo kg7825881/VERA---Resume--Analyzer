@@ -16,3 +16,4 @@ pytest
 pdfplumber
 docx2txt
 json-repair
+langchain-text-splitters
