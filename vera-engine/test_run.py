@@ -16,8 +16,8 @@ from scorer import calculate_job_fit
 
 DATA_DIR = os.path.expanduser("~/kaggle/input/talentlens-batch/")
 
-RESUME_FILE = "candidate_1.pdf"   # change to match your actual sample file
-JD_FILE = "job_description.pdf"   # change to match your actual sample file
+JD_FILE = "Data Engineer — AI Data Platform - 2026.docx"   # change to match your actual sample file
+RESUME_FILE = "Naukri_PreetiBhadauria[6y_0m].pdf"   # change to match your actual sample file
 
 
 def main():
