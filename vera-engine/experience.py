@@ -28,10 +28,43 @@ _MONTH = r"[A-Za-z]{3,9}"
 # default is passed in — NOT as "March 2024". That silently produced a year-1900 date,
 # which is exactly the kind of wrong-but-plausible-looking value this module exists to
 # prevent. These patterns catch that shape and expand it to a real 4-digit year first.
+# Separator is OPTIONAL (`*` not `+`) — confirmed in production some resumes/extractions
+# glue month and year together with no separator at all ("Oct24"), most commonly as the
+# second half of a compressed range like "Mar 24-Oct24" (see
+# _split_compressed_date_range below) once it's been split on the hyphen.
 _TWO_DIGIT_YEAR_PATTERNS = [
-    re.compile(rf"^({_MONTH})[\s\-/]+(\d{{2}})$"),   # "Mar 24", "Mar-24", "Mar/24"
-    re.compile(rf"^(\d{{2}})[\s\-/]+({_MONTH})$"),   # "24 Mar", "24-Mar"
+    re.compile(rf"^({_MONTH})[\s\-/]*(\d{{2}})$"),   # "Mar 24", "Mar-24", "Mar/24", "Mar24"
+    re.compile(rf"^(\d{{2}})[\s\-/]*({_MONTH})$"),   # "24 Mar", "24-Mar", "24Mar"
 ]
+
+# Catches an entire date RANGE that ended up in a single date field instead of being
+# split into separate start_date_raw/end_date_raw — e.g. start_date_raw="Mar 24-Oct24".
+# Confirmed in production: the source resume wrote the range as one compact, unspaced
+# token, and Stage 2's extraction model copied it verbatim into one field rather than
+# splitting it per the schema. This is a deterministic recovery for that specific
+# field-boundary slip, not a general-purpose date-format parser — same "LLM structures,
+# Python catches the deterministic edge case" split used for the two-digit-year fix
+# above and the JD fabrication guard in jd_extractor.py.
+_COMPRESSED_RANGE_RE = re.compile(
+    rf"^({_MONTH})\.?\s*(\d{{2,4}})\s*(?:-|\u2013|\u2014|to)\s*({_MONTH})\.?\s*(\d{{2,4}})$",
+    re.IGNORECASE,
+)
+
+
+def _split_compressed_date_range(raw: str):
+    """
+    Returns (start_str, end_str) — each individually parseable by _parse_date — if `raw`
+    looks like a whole "Month YY - Month YY" range squeezed into one field (with or
+    without spaces around the separator, e.g. "Mar 24-Oct24", "Mar2024 to Oct 2024").
+    Returns None otherwise.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    m = _COMPRESSED_RANGE_RE.match(raw.strip())
+    if not m:
+        return None
+    start_month, start_year, end_month, end_year = m.groups()
+    return f"{start_month} {start_year}", f"{end_month} {end_year}"
 
 
 def _expand_two_digit_year(raw: str) -> str:
@@ -105,11 +138,39 @@ def compute_total_years(experience_entries: list) -> tuple:
         end_raw = entry.get("end_date_raw", "")
 
         start = _parse_date(start_raw)
+
+        # Recovery path: start_date_raw on its own didn't parse — check whether it's
+        # actually a whole range compressed into one field (see
+        # _split_compressed_date_range's docstring) before giving up on this entry.
+        split_range = None
+        if start is None:
+            split_range = _split_compressed_date_range(start_raw)
+            if split_range:
+                split_start_raw, split_end_raw = split_range
+                start = _parse_date(split_start_raw)
+                if start is not None:
+                    warnings.append(
+                        f"start_date_raw '{start_raw}' for '{label}' looked like a whole "
+                        f"date range compressed into one field — recovered as start="
+                        f"'{split_start_raw}', end='{split_end_raw}'. Verify manually."
+                    )
+
         if start is None:
             warnings.append(f"Could not parse start date '{start_raw}' for '{label}' — excluded from experience total.")
             continue
 
         end = _parse_date(end_raw)
+        if end is None and split_range is not None:
+            # end_date_raw was empty/unparseable on its own, and start_date_raw turned
+            # out to be a compressed range — use the range's own end half rather than
+            # discarding real end-date information the resume did provide, just filed
+            # under the wrong field.
+            _, split_end_raw = split_range
+            recovered_end = _parse_date(split_end_raw)
+            if recovered_end is not None:
+                end = recovered_end
+                end_raw = split_end_raw
+
         parsed.append({"start": start, "end": end, "label": label, "end_raw": end_raw})
 
     if not parsed:
