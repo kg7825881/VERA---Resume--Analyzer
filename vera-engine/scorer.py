@@ -45,8 +45,8 @@ from matcher import score_skill_list, evidence_status
 from retrieval import CandidateEvidenceIndex
 
 WEIGHTS = {
-    "mandatory_skills": 0.25,
-    "relevant_experience": 0.25,
+    "mandatory_skills": 0.30,
+    "relevant_experience": 0.20,
     "job_title_match": 0.05,
     "industry_keywords": 0.10,
     "soft_skills": 0.10,
