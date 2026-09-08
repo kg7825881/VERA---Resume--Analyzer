@@ -36,6 +36,32 @@ from matcher import MATCH_LEVEL_CONTRIBUTION
 STOPWORDS = {"the", "a", "an", "of", "and", "for"}
 
 
+def _bounded_related_title(title: str, target_role_title: str) -> str | None:
+    """Recognise a small set of defensible, adjacent title families.
+
+    This is deliberately a weak match, not a synonym system.  It captures
+    roles such as Data Scientist and AI Technical Lead for an AI data-engineer
+    opening without letting an unrelated Product Manager receive title credit
+    merely because the resume mentions AI elsewhere.
+    """
+    title_text = (title or "").lower()
+    target_text = (target_role_title or "").lower()
+    if "data engineer" not in target_text:
+        return None
+    if "data scientist" in title_text or "data analyst" in title_text:
+        return "Adjacent data role; relevant but not the same title."
+    if "ai technical lead" in title_text or "technical lead" in title_text and "ai" in title_text:
+        return "AI technical leadership is adjacent to the AI data-engineering role."
+    return None
+
+
+def _is_plausible_title(value: str) -> bool:
+    """Reject a resume-summary sentence accidentally extracted as a title."""
+    text = (value or "").strip()
+    words = re.findall(r"[A-Za-z0-9+#.&/-]+", text)
+    return bool(text) and len(text) <= 100 and len(words) <= 12 and not re.search(r"[.;\n]", text)
+
+
 def _tokenize(text: str) -> set:
     words = re.findall(r"[a-z0-9]+", (text or "").lower())
     return {w for w in words if w not in STOPWORDS}
@@ -158,7 +184,7 @@ def _collect_candidate_titles(candidate_data: dict) -> list[dict]:
     seen = set()
 
     summary_title = (candidate_data.get("current_role_title_from_summary") or "").strip()
-    if summary_title:
+    if _is_plausible_title(summary_title):
         titles.append({"title": summary_title, "company": "(from resume summary)"})
         seen.add(summary_title.lower())
 
@@ -247,6 +273,24 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
         if groundedness_warning:
             match_level = "none"
             contribution = 0.0
+
+    # Keep the judge grounded, but do not turn sensible, bounded adjacent
+    # titles into an automatic zero merely because they do not share the
+    # exact JD wording.
+    related_title_reason = _bounded_related_title(latest_title_dict["title"], target_role_title)
+    if contribution == 0.0 and related_title_reason:
+        match_level = "related"
+        contribution = 0.8
+        judge_reason = related_title_reason
+        groundedness_warning = None
+    elif contribution == 0.0:
+        judge_reason = "No supported current-title match."
+
+    # Exact wording earns full credit above.  Any grounded semantic/adjacent
+    # title is intentionally capped at the business-approved 80% level.
+    if contribution > 0.0:
+        match_level = "related"
+        contribution = 0.8
 
     if contribution >= 1.0:
         status = "matched"
