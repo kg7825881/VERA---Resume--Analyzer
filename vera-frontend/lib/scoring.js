@@ -126,7 +126,9 @@ export function evidenceSections(record) {
   const ev = record.evidence || {};
 
   const skillSections = [
-    { key: "mandatory_skills", label: "Mandatory Skills", items: (ev.mandatory_skills || []).map(mapSkillRow) },
+    { key: "mandatory_technical_skills", label: "Mandatory Technical Skills", items: (ev.mandatory_technical_skills || ev.mandatory_skills || []).map(mapSkillRow) },
+    { key: "mandatory_domain_requirements", label: "Mandatory Domain Requirements", items: (ev.mandatory_domain_requirements || []).map(mapSkillRow) },
+    { key: "mandatory_role_specific_requirements", label: "Mandatory Role-Specific Requirements", items: (ev.mandatory_role_specific_requirements || []).map(mapSkillRow) },
     { key: "industry_keywords", label: "Domain Experience", items: (ev.industry_keywords || []).map(mapSkillRow) },
     { key: "soft_skills", label: "Role-Specific Requirements", items: (ev.soft_skills || []).map(mapSkillRow) },
     { key: "preferred_skills", label: "Preferred Skills", items: (ev.preferred_skills || []).map(mapSkillRow) },
