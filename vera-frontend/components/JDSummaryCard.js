@@ -5,9 +5,8 @@ export default function JDSummaryCard({ jd }) {
       { key: "mandatory-technical", label: "Mandatory Technical Skills", items: jd.mandatory_skills || [], kind: "mandatory" },
       { key: "mandatory-domain", label: "Mandatory Domain Requirements", items: jd.mandatory_domain_requirements || [], kind: "mandatory" },
       { key: "mandatory-role", label: "Mandatory Role-Specific Requirements", items: jd.mandatory_role_specific_requirements || [], kind: "mandatory" },
-      { key: "preferred-technical", label: "Preferred Technical Skills", items: jd.preferred_technical_skills || [], kind: "preferred" },
+      { key: "preferred", label: "Preferred Skills", items: [...(jd.preferred_technical_skills || []), ...(jd.industry_keywords || [])], kind: "preferred" },
       { key: "role-requirements", label: "Role-Specific Requirements", items: jd.soft_preferred_skills || [], kind: "preferred" },
-      { key: "domain-experience", label: "Domain Experience", items: jd.industry_keywords || [], kind: "domain" },
     ].filter((group) => group.items.length > 0);
   
     const eduReq = (jd.education_requirements || [])
