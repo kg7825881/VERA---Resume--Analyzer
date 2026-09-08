@@ -54,7 +54,9 @@ WEIGHTS = {
     "preferred_skills": 0.05,
 }
 
-HARD_GATE_MAX_MISSING_MANDATORY = 6 # Fail the gate if ANY mandatory skill doesn't clear GATE_MIN_CONTRIBUTION
+# A fixed "allowed missing" count makes the gate stricter merely because a JD
+# happens to contain more extracted requirements.  Require a proportion instead.
+HARD_GATE_MIN_MANDATORY_COVERAGE = 0.60
 
 
 def _score_experience(candidate_data: dict, jd_data: dict) -> tuple[float, str, dict]:
@@ -161,7 +163,7 @@ def _score_education(candidate_data: dict, jd_data: dict) -> tuple[float, str, l
 
     # Case 1: No education required in JD -> Full score
     if not requirements:
-        return WEIGHTS["education"] * 100, "No specific education requirement in JD", []
+        return WEIGHTS["education"] * 100, "No education requirement in JD", [{"status": "not_required"}]
 
     education_evidence = []
     any_matched = False
@@ -170,6 +172,8 @@ def _score_education(candidate_data: dict, jd_data: dict) -> tuple[float, str, l
     # A Master's or PhD degree also fulfills a Bachelor's requirement
     if "master" in cand_tiers or "phd" in cand_tiers:
         cand_tiers.add("bachelor")
+    if "phd" in cand_tiers:
+        cand_tiers.add("master")
 
     for req in requirements:
         req_level = req.get("degree_level", "")
@@ -272,10 +276,15 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
     mandatory_score = mandatory_result["average_contribution"] * WEIGHTS["mandatory_skills"] * 100
 
     gate_missing_mandatory = mandatory_result["gate_missing"]
-    hard_gate_failed = len(gate_missing_mandatory) > HARD_GATE_MAX_MISSING_MANDATORY
+    mandatory_coverage = (
+        (mandatory_total - len(gate_missing_mandatory)) / mandatory_total
+        if mandatory_total else 1.0
+    )
+    hard_gate_failed = mandatory_coverage < HARD_GATE_MIN_MANDATORY_COVERAGE
     hard_gate_reason = (
-        f"{len(gate_missing_mandatory)} of {mandatory_total} mandatory skills missing or not "
-        f"confidently evidenced: {', '.join(gate_missing_mandatory)}"
+        f"Mandatory-skill coverage is {mandatory_coverage:.0%}; at least "
+        f"{HARD_GATE_MIN_MANDATORY_COVERAGE:.0%} is required. Missing or not confidently "
+        f"evidenced: {', '.join(gate_missing_mandatory)}"
         if hard_gate_failed else ""
     )
 
