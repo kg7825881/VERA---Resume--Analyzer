@@ -5,9 +5,13 @@ import { useRouter } from "next/navigation";
 import { getResults, listJDs, getJD } from "../../../lib/api";
 import { useAppState, useToast } from "../../providers";
 import Pill from "../../../components/Pill";
-import { statusFor, initials, passesMandatory, rankAll, CATEGORY_MAX, mostRecentRole } from "../../../lib/scoring";
+import { statusFor, initials, passesMandatory, rankAll, CATEGORY_MAX, CATEGORY_LABELS, mostRecentRole } from "../../../lib/scoring";
 
 const COMPARISON_THRESHOLD = 75;
+
+function categoryValue(category, max) {
+  return category?.not_applicable ? "—" : `${category?.score ?? 0}/${max}`;
+}
 
 export default function ResultsPage({ params }) {
   const { roleId } = params;
@@ -84,6 +88,12 @@ export default function ResultsPage({ params }) {
 
   const data = state.resultsCache[roleId];
   const all = useMemo(() => (data ? rankAll(data.ranked, data.excluded_hard_gate_failed) : []), [data]);
+  const scoreColumns = useMemo(
+    () => Object.keys(CATEGORY_MAX).filter((key) =>
+      all.some((record) => !record.category_scores?.[key]?.not_applicable)
+    ),
+    [all]
+  );
 
   const stats = useMemo(() => {
     if (!all.length) return null;
@@ -213,13 +223,7 @@ export default function ResultsPage({ params }) {
                 <th>Rank</th>
                 <th>Candidate</th>
                 <th>Job Fit</th>
-                <th>Mandatory</th>
-                <th>Experience</th>
-                <th>Education</th>
-                <th>Domain</th>
-                <th>Role Requirements</th>
-                <th>Job Title</th>
-                <th>Preferred</th>
+                {scoreColumns.map((key) => <th key={key}>{CATEGORY_LABELS[key]}</th>)}
                 <th>Status</th>
               </tr>
             </thead>
@@ -249,27 +253,9 @@ export default function ResultsPage({ params }) {
                       </div>
                     </td>
                     <td className="score">{r.final_score}%</td>
-                    <td>
-                      {cs.mandatory_skills?.score ?? 0}/{CATEGORY_MAX.mandatory_skills}
-                    </td>
-                    <td>
-                      {cs.relevant_experience?.score ?? 0}/{CATEGORY_MAX.relevant_experience}
-                    </td>
-                    <td>
-                      {cs.education?.score ?? 0}/{CATEGORY_MAX.education}
-                    </td>
-                    <td>
-                      {cs.industry_keywords?.score ?? 0}/{CATEGORY_MAX.industry_keywords}
-                    </td>
-                    <td>
-                      {cs.soft_skills?.score ?? 0}/{CATEGORY_MAX.soft_skills}
-                    </td>
-                    <td>
-                      {cs.job_title_match?.score ?? 0}/{CATEGORY_MAX.job_title_match}
-                    </td>
-                    <td>
-                      {cs.preferred_skills?.score ?? 0}/{CATEGORY_MAX.preferred_skills}
-                    </td>
+                    {scoreColumns.map((key) => (
+                      <td key={key}>{categoryValue(cs[key], CATEGORY_MAX[key])}</td>
+                    ))}
                     <td>
                       <Pill kind={status.key}>{status.label}</Pill>
                     </td>
@@ -278,7 +264,7 @@ export default function ResultsPage({ params }) {
               })}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={11} className="center-pad">
+                  <td colSpan={scoreColumns.length + 4} className="center-pad">
                     No candidates match this filter.
                   </td>
                 </tr>
