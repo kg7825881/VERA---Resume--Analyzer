@@ -181,26 +181,37 @@ def upload_resumes(files: List[UploadFile] = File(...)):
 # --- Analyze ---
 
 class AnalyzeRequest(BaseModel):
-    role_query: str
+    role_id: Optional[str] = None
+    role_query: Optional[str] = None
     candidate_ids: Optional[List[str]] = None  # if omitted, scores ALL stored resumes
 
 
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest):
-    roles = db.get_all_roles()
-    resolution = resolve_role(req.role_query, roles)
+    # The UI already has a selected role_id.  Use it directly rather than trying
+    # to infer the same record again from a non-unique display title.
+    if req.role_id:
+        role = db.get_jd_by_role_id(req.role_id)
+        if not role:
+            raise HTTPException(404, f"No JD found for role_id '{req.role_id}'.")
+    elif req.role_query:
+        roles = db.get_all_roles()
+        resolution = resolve_role(req.role_query, roles)
 
-    if resolution["status"] == "no_match":
-        raise HTTPException(404, f"No JD found matching '{req.role_query}'. Upload a JD for this role first.")
+        if resolution["status"] == "no_match":
+            raise HTTPException(404, f"No JD found matching '{req.role_query}'. Upload a JD for this role first.")
 
-    if resolution["status"] == "ambiguous":
-        return {
-            "status": "ambiguous",
-            "message": f"'{req.role_query}' matches multiple roles — please specify which one.",
-            "candidates": [{"role_id": c["role_id"], "role_title": c["role_title"]} for c in resolution["candidates"]],
-        }
+        if resolution["status"] == "ambiguous":
+            return {
+                "status": "ambiguous",
+                "message": f"'{req.role_query}' matches multiple roles — please specify which one.",
+                "candidates": [{"role_id": c["role_id"], "role_title": c["role_title"]} for c in resolution["candidates"]],
+            }
 
-    role = resolution["role"]
+        role = resolution["role"]
+    else:
+        raise HTTPException(422, "Provide role_id or role_query.")
+
     jd_data = db.get_jd_by_role_id(role["role_id"])
     resumes = db.get_resumes(req.candidate_ids)
 
