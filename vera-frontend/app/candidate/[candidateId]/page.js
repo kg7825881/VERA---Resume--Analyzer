@@ -190,8 +190,17 @@ function CandidateDetail({ params }) {
           </div>
           <div className="body metrics">
             {Object.entries(CATEGORY_MAX).filter(([key]) => !record.category_scores?.[key]?.not_applicable).map(([key, max]) => {
-              const score = record.category_scores?.[key]?.score ?? 0;
-              const pct = Math.round((score / max) * 100);
+              const category = record.category_scores?.[key] || {};
+              const score = category.score ?? 0;
+              const hasSkillCoverage = Number.isFinite(category.required_count);
+              const pct = hasSkillCoverage
+                ? category.match_percentage
+                : Math.round((score / max) * 100);
+              const summary = hasSkillCoverage
+                ? (category.not_required
+                  ? ""
+                  : `${pct}% (${category.matched_count}/${category.required_count})`)
+                : `${pct}%`;
               return (
                 <div className="metric" key={key}>
                   <small>{CATEGORY_LABELS[key] || key}</small>
@@ -199,7 +208,7 @@ function CandidateDetail({ params }) {
                     <i style={{ width: `${Math.min(pct, 100)}%` }} />
                   </div>
                   <strong>
-                    {score}/{max}
+                    {summary}
                   </strong>
                 </div>
               );
