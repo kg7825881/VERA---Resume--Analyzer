@@ -15,16 +15,13 @@ scorer.py — scoring engine implementing the simplified methodology:
     pure token-overlap approach specifically because it missed genuinely related titles
     that share no words (e.g. "AI Architect" vs required "Data Engineer") — see
     job_title_matcher.py's module docstring. Not a hard gate.
-  - Industry Keywords (10%): JD-stated industry/domain terms (e.g. "Fintech",
-    "Healthcare"), matched via the same BM25 + judge evidence pipeline as skills, guarded
-    against fabrication the same way min_years_experience is (see jd_extractor.py).
   - Soft Skills (5%): the JD's soft_preferred_skills, now scored as its own category
     instead of being folded into Preferred Skills — same evidence pipeline.
   - Education (5%): degree match against JD education_requirements
   - Preferred Skills (5%): technical preferred skills only (soft skills split out above);
     exact match, or BM25-retrieved evidence + LLM judgment
 
-Non-exact skill/keyword matching (mandatory, industry, soft, and preferred) all go
+Non-exact matching (mandatory, soft, and preferred) all goes through the same
 through matcher.py's evidence pipeline: BM25 retrieval (retrieval.py) finds the
 candidate's most relevant resume text for a requirement, then a small local LLM
 (judge.py) classifies how well that evidence supports it. See matcher.py's module
@@ -47,10 +44,9 @@ from retrieval import CandidateEvidenceIndex
 WEIGHTS = {
     "mandatory_skills": 0.30,
     "relevant_experience": 0.20,
-    "job_title_match": 0.05,
-    "industry_keywords": 0.10,
+    "job_title_match": 0.10,
     "soft_skills": 0.10,
-    "education": 0.20,
+    "education": 0.25,
     "preferred_skills": 0.05,
 }
 
@@ -227,7 +223,7 @@ def _build_evidence(result: dict) -> list[dict]:
     return rows
 
 
-def _extra_candidate_skills(candidate_skills: list[str], *results: dict) -> list[str]:
+def _extra_candidate_skills(candidate_skills: list[str], *results: dict, limit: int = 24) -> tuple[list[str], int]:
     """
     Extracts candidate skills not consumed by any JD requirement. Only exact
     matches actually "consume" an entry from candidate_skills — evidence-based
@@ -240,7 +236,19 @@ def _extra_candidate_skills(candidate_skills: list[str], *results: dict) -> list
         for r in result["results"]:
             if r["match_type"] == "exact" and r.get("matched_against"):
                 used.add(r["matched_against"].strip().lower())
-    return [s for s in candidate_skills if s.strip().lower() not in used]
+    extras = []
+    seen = set()
+    for skill in candidate_skills:
+        normalized = skill.strip().lower()
+        if not normalized or normalized in used or normalized in seen:
+            continue
+        seen.add(normalized)
+        extras.append(skill.strip())
+
+    # A resume can contain hundreds of extracted phrases.  The evidence panel
+    # should remain a useful summary, rather than becoming an unbounded skills
+    # dump that hides the JD comparison above it.
+    return extras[:limit], len(extras)
 
 
 def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_evidence) -> dict:
@@ -249,7 +257,7 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
 
     Builds one CandidateEvidenceIndex (BM25 over this candidate's experience/
     project/skills text — see retrieval.py) up front and reuses it for every
-    mandatory, preferred, industry-keyword, and soft-skill requirement below,
+    mandatory, preferred, and role-specific requirement below,
     rather than rebuilding it per requirement.
 
     Mandatory skills (exact_only=False): an exact/word-boundary match still earns
@@ -293,8 +301,15 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
         if hard_gate_failed else ""
     )
 
-    # --- Preferred Skills (technical only — soft skills are their own category below) ---
-    jd_preferred_skills = jd_data.get("preferred_technical_skills", [])
+    # --- Preferred Skills ---
+    # Domain terms are useful differentiators but are not a separate scoring
+    # category.  Treat them as preferred evidence alongside the JD's explicitly
+    # preferred technical skills, under the single 5-point Preferred Skills
+    # weight configured above.
+    jd_preferred_skills = (
+        jd_data.get("preferred_technical_skills", [])
+        + jd_data.get("industry_keywords", [])
+    )
     pref_result = score_skill_list(
         jd_preferred_skills, candidate_skills, evidence_index, judge_fn, exact_only=False
     )
@@ -307,14 +322,6 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
     )
     soft_score = soft_result["average_contribution"] * WEIGHTS["soft_skills"] * 100
 
-    # --- Industry Keywords (JD-stated industry/domain terms, fabrication-guarded on
-    # the JD side — see jd_extractor.py's _guard_against_fabricated_industry_keywords) ---
-    jd_industry_keywords = jd_data.get("industry_keywords", [])
-    industry_result = score_skill_list(
-        jd_industry_keywords, candidate_skills, evidence_index, judge_fn, exact_only=False
-    )
-    industry_score = industry_result["average_contribution"] * WEIGHTS["industry_keywords"] * 100
-
     # --- Job Title Match (judge-based, one call over all titles — see job_title_matcher.py) ---
     job_title_score, job_title_notes, job_title_evidence = _score_job_title(candidate_data, jd_data, judge_fn)
 
@@ -326,6 +333,7 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
 
     category_scores = {
         "mandatory_skills": {
+            # All mandatory JD groups share this one 30-point category.
             "score": round(mandatory_score, 2),
             "matched": mandatory_result["matched"],
             "missing": mandatory_result["missing"],
@@ -333,12 +341,8 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
         },
         "relevant_experience": {"score": experience_score, "notes": experience_notes},
         "job_title_match": {"score": job_title_score, "notes": job_title_notes},
-        "industry_keywords": {
-            "score": round(industry_score, 2),
-            "matched": industry_result["matched"],
-            "missing": industry_result["missing"],
-        },
         "soft_skills": {
+            # No JD role-specific requirement means no candidate is penalized.
             "score": round(soft_score, 2),
             "matched": soft_result["matched"],
             "missing": soft_result["missing"],
@@ -348,10 +352,15 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
             "matched": pref_result["matched"],
             "missing": pref_result["missing"],
         },
+        # No JD education requirement likewise gives the full 20-point baseline.
         "education": {"score": education_score, "notes": education_notes},
     }
 
     final_score = round(sum(c["score"] for c in category_scores.values()), 2)
+
+    additional_skills, additional_skills_total = _extra_candidate_skills(
+        candidate_skills, mandatory_result, pref_result, soft_result
+    )
 
     evidence = {
         "mandatory_technical_skills": [
@@ -365,13 +374,11 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
         ],
         "preferred_skills": _build_evidence(pref_result),
         "soft_skills": _build_evidence(soft_result),
-        "industry_keywords": _build_evidence(industry_result),
         "job_title": job_title_evidence,
         "experience": experience_evidence,
         "education": education_evidence,
-        "additional_candidate_skills": _extra_candidate_skills(
-            candidate_skills, mandatory_result, pref_result, soft_result, industry_result
-        ),
+        "additional_candidate_skills": additional_skills,
+        "additional_candidate_skills_total": additional_skills_total,
     }
 
     return {
