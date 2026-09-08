@@ -216,8 +216,8 @@ export default function ResultsPage({ params }) {
                 <th>Mandatory</th>
                 <th>Experience</th>
                 <th>Education</th>
-                <th>Industry</th>
-                <th>Soft Skills</th>
+                <th>Domain</th>
+                <th>Role Requirements</th>
                 <th>Job Title</th>
                 <th>Preferred</th>
                 <th>Status</th>
