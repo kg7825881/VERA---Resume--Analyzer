@@ -156,6 +156,8 @@ function CandidateDetail({ params }) {
   const sections = evidenceSections(record);
   const explanation = explainRank(record, roleTitle);
   const ringGradient = `conic-gradient(var(--a) 0 ${record.final_score}%, #173047 ${record.final_score}%)`;
+  const hasExperienceRequirement = Boolean(sections.experience.years);
+  const hasEducationRequirement = record.evidence?.education?.[0]?.status !== "not_required";
 
   return (
     <section className="view active">
@@ -187,7 +189,7 @@ function CandidateDetail({ params }) {
             <span className="tag">Explainable</span>
           </div>
           <div className="body metrics">
-            {Object.entries(CATEGORY_MAX).map(([key, max]) => {
+            {Object.entries(CATEGORY_MAX).filter(([key]) => !record.category_scores?.[key]?.not_applicable).map(([key, max]) => {
               const score = record.category_scores?.[key]?.score ?? 0;
               const pct = Math.round((score / max) * 100);
               return (
@@ -212,12 +214,11 @@ function CandidateDetail({ params }) {
             <h3>Evidence</h3>
           </div>
           <div className="body">
-            {/* Skill categories: Mandatory, Industry Keywords, Soft Skills, Preferred */}
+            {/* Only JD requirement categories that contain criteria are shown. */}
             {sections.skillSections.map((section) => (
               <EvidenceSection
                 title={section.label}
                 key={section.key}
-                emptyMessage={section.items.length === 0 ? "No requirements in this category." : null}
               >
                 {section.items.map((item, i) => (
                   <EvidenceChip
@@ -250,8 +251,8 @@ function CandidateDetail({ params }) {
               </EvidenceSection>
             )}
 
-            {/* Experience Evidence */}
-            <EvidenceSection title="Experience">
+            {/* Experience is only a scored section when the JD specifies a minimum. */}
+            {hasExperienceRequirement && <EvidenceSection title="Experience">
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                 {sections.experience.years && (
                   <EvidenceChip
@@ -272,10 +273,10 @@ function CandidateDetail({ params }) {
               {sections.experience.roles.length === 0 && !sections.experience.years && (
                 <div className="muted" style={{ marginTop: 6 }}>No experience entries recorded.</div>
               )}
-            </EvidenceSection>
+            </EvidenceSection>}
 
             {/* Education Evidence */}
-            <EvidenceSection
+            {hasEducationRequirement && <EvidenceSection
               title="Education"
               emptyMessage={sections.education.length === 0 ? "No education extracted from resume." : null}
             >
@@ -287,11 +288,13 @@ function CandidateDetail({ params }) {
                   detail={e.detail} 
                 />
               ))}
-            </EvidenceSection>
+            </EvidenceSection>}
 
             {/* Additional Skills */}
             {sections.additionalSkills.length > 0 && (
-              <EvidenceSection title="Additional candidate skills">
+              <EvidenceSection title={sections.additionalSkillsTotal > sections.additionalSkills.length
+                ? `Additional candidate skills (showing ${sections.additionalSkills.length} of ${sections.additionalSkillsTotal})`
+                : "Additional candidate skills"}>
                 {sections.additionalSkills.map((skill, i) => (
                   <span key={i} className="tag pref">
                     {skill}
