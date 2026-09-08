@@ -1,8 +1,14 @@
 export default function JDSummaryCard({ jd }) {
     if (!jd) return null;
   
-    const mandatory = jd.mandatory_skills || [];
-    const preferred = [...(jd.preferred_technical_skills || []), ...(jd.soft_preferred_skills || [])];
+    const groups = [
+      { key: "mandatory-technical", label: "Mandatory Technical Skills", items: jd.mandatory_skills || [], kind: "mandatory" },
+      { key: "mandatory-domain", label: "Mandatory Domain Requirements", items: jd.mandatory_domain_requirements || [], kind: "mandatory" },
+      { key: "mandatory-role", label: "Mandatory Role-Specific Requirements", items: jd.mandatory_role_specific_requirements || [], kind: "mandatory" },
+      { key: "preferred-technical", label: "Preferred Technical Skills", items: jd.preferred_technical_skills || [], kind: "preferred" },
+      { key: "role-requirements", label: "Role-Specific Requirements", items: jd.soft_preferred_skills || [], kind: "preferred" },
+      { key: "domain-experience", label: "Domain Experience", items: jd.industry_keywords || [], kind: "domain" },
+    ].filter((group) => group.items.length > 0);
   
     const eduReq = (jd.education_requirements || [])
       .map((e) => [e.degree_level, e.field].filter(Boolean).join(" in "))
@@ -10,7 +16,7 @@ export default function JDSummaryCard({ jd }) {
       .join(" or ");
   
     const summaryLine = [
-      jd.min_years_experience != null ? `${jd.min_years_experience}+ yrs experience` : null,
+      jd.min_years_experience > 0 ? `${jd.min_years_experience}+ yrs experience` : null,
       eduReq || null,
     ]
       .filter(Boolean)
@@ -21,18 +27,24 @@ export default function JDSummaryCard({ jd }) {
         <div className="body">
           <h3 style={{ margin: "0 0 12px" }}>{jd.role_title || "Role"}</h3>
   
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: mandatory.length || preferred.length ? 12 : 0 }}>
-            {mandatory.map((skill) => (
-              <span key={`m-${skill}`} className="tag" style={{ background: "var(--b)", color: "#fff", fontWeight: 600 }}>
-                {skill}
-              </span>
-            ))}
-            {preferred.map((skill) => (
-              <span key={`p-${skill}`} className="tag pref">
-                {skill}
-              </span>
-            ))}
-          </div>
+          {groups.map((group) => (
+            <div key={group.key} style={{ marginBottom: 12 }}>
+              <small style={{ display: "block", color: "var(--m)", fontWeight: 800, letterSpacing: ".05em", marginBottom: 6 }}>
+                {group.label}
+              </small>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {group.items.map((item) => (
+                  <span
+                    key={`${group.key}-${item}`}
+                    className={group.kind === "mandatory" ? "tag" : "tag pref"}
+                    style={group.kind === "mandatory" ? { background: "var(--b)", color: "#fff", fontWeight: 600 } : undefined}
+                  >
+                    {item}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
   
           {summaryLine && <div style={{ color: "var(--m)", fontSize: 13 }}>{summaryLine}</div>}
         </div>
