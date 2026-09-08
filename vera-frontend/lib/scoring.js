@@ -4,8 +4,8 @@
 
 // Max points per category mirroring scorer.py's WEIGHTS * 100
 export const CATEGORY_MAX = {
-  mandatory_skills: 25,
-  relevant_experience: 25,
+  mandatory_skills: 30,
+  relevant_experience: 20,
   education: 20,
   industry_keywords: 10,
   soft_skills: 10,
@@ -17,8 +17,8 @@ export const CATEGORY_LABELS = {
   mandatory_skills: "Mandatory Skills",
   relevant_experience: "Experience",
   education: "Education",
-  industry_keywords: "Industry Keywords",
-  soft_skills: "Soft Skills",
+  industry_keywords: "Domain Experience",
+  soft_skills: "Role-Specific Requirements",
   job_title_match: "Job Title Match",
   preferred_skills: "Preferred Skills",
 };
@@ -52,10 +52,9 @@ export function initials(name) {
     .join("");
 }
 
-/** True when every mandatory skill was matched (nothing in `missing`). */
+/** The backend is the source of truth for the configurable mandatory-skills gate. */
 export function passesMandatory(record) {
-  const missing = record.category_scores?.mandatory_skills?.missing || [];
-  return missing.length === 0;
+  return !record.hard_gate_failed;
 }
 
 /** Sort every scored record (ranked + excluded) by final_score desc, and attach a 1-based rank. */
@@ -96,8 +95,8 @@ export function evidenceList(record) {
   const cats = [
     ["mandatory_skills", "Mandatory"],
     ["preferred_skills", "Preferred"],
-    ["soft_skills", "Soft Skills"],
-    ["industry_keywords", "Industry"],
+    ["soft_skills", "Role-Specific Requirements"],
+    ["industry_keywords", "Domain Experience"],
   ];
   const items = [];
   for (const [key, label] of cats) {
@@ -128,8 +127,8 @@ export function evidenceSections(record) {
 
   const skillSections = [
     { key: "mandatory_skills", label: "Mandatory Skills", items: (ev.mandatory_skills || []).map(mapSkillRow) },
-    //{ key: "industry_keywords", label: "Industry Keywords", items: (ev.industry_keywords || []).map(mapSkillRow) },
-    { key: "soft_skills", label: "Soft Skills", items: (ev.soft_skills || []).map(mapSkillRow) },
+    { key: "industry_keywords", label: "Domain Experience", items: (ev.industry_keywords || []).map(mapSkillRow) },
+    { key: "soft_skills", label: "Role-Specific Requirements", items: (ev.soft_skills || []).map(mapSkillRow) },
     { key: "preferred_skills", label: "Preferred Skills", items: (ev.preferred_skills || []).map(mapSkillRow) },
   ];
 
@@ -142,7 +141,9 @@ export function evidenceSections(record) {
   }));
 
   let educationItems = [];
-  if (ev.education && ev.education.length > 0) {
+  if (ev.education?.[0]?.status === "not_required") {
+    educationItems = [{ label: "No education requirement in this job description", status: "matched", detail: "Not scored as a candidate qualification" }];
+  } else if (ev.education && ev.education.length > 0) {
     educationItems = ev.education.map((e) => ({
       label: [e.required_degree_level, e.required_field].filter(Boolean).join(" in ") || "Requirement",
       status: e.status, // "matched" or "missing"

@@ -164,12 +164,12 @@ export async function uploadResumes(files) {
  * Resolve a role query and score resumes against it.
  * candidateIds: pass the ids from the current upload batch, or omit to score every stored resume.
  */
-export function analyze(roleQuery, candidateIds) {
+export function analyze(roleId, candidateIds) {
   return request("/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      role_query: roleQuery,
+      role_id: roleId,
       candidate_ids: candidateIds && candidateIds.length ? candidateIds : null,
     }),
   });
