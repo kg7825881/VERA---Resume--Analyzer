@@ -30,7 +30,6 @@ job-title match and a skill match mean the same thing on the same 0-1 scale.
 """
 
 import re
-import difflib
 from judge import judge_evidence
 from matcher import MATCH_LEVEL_CONTRIBUTION
 
@@ -202,22 +201,18 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
         {"title": t["title"], "company": t["company"], "jaccard": round(_jaccard(target_tokens, _tokenize(t["title"])), 3)}
         for t in titles
     ]
-    all_titles.sort(key=lambda t: t["jaccard"], reverse=True)
-
-    # NEW: Deterministic bypass check on the latest/current job title
+    # Always score the current/latest title.  Older titles remain available for
+    # context but must not be presented as the candidate's current match.
     latest_title_dict = titles[0]
-    similarity_ratio = difflib.SequenceMatcher(
-        None, 
-        _normalize_for_containment(target_role_title), 
-        _normalize_for_containment(latest_title_dict["title"])
-    ).ratio()
+    latest_tokens = _tokenize(latest_title_dict["title"])
+    overlap = _jaccard(target_tokens, latest_tokens)
 
-    if similarity_ratio >= 0.50:
+    if target_tokens == latest_tokens:
         # Bypass the judge and return deterministic score
-        contribution = 1.0 if similarity_ratio == 1.0 else 0.85
-        match_level = "direct" if similarity_ratio == 1.0 else "related"
-        status = "matched" if contribution >= 1.0 else "related"
-        judge_reason = f"Deterministic match: Latest title '{latest_title_dict['title']}' is {similarity_ratio:.0%} similar to required '{target_role_title}'."
+        contribution = 1.0
+        match_level = "direct"
+        status = "matched"
+        judge_reason = f"Exact current-title match: '{latest_title_dict['title']}'."
         
         best_match = dict(latest_title_dict)
         best_match["jaccard"] = round(_jaccard(target_tokens, _tokenize(latest_title_dict["title"])), 3)
@@ -233,11 +228,11 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
             "judge_reason": judge_reason,
         }
 
-    # FALLBACK: If similarity is < 50%, hand off to the judge to evaluate for synonyms
-    evidence_chunks = [
-        {"text": t["title"], "source_type": "job_title", "source_label": f"{t['title']} at {t['company']}"}
-        for t in titles
-    ]
+    evidence_chunks = [{
+        "text": latest_title_dict["title"],
+        "source_type": "job_title",
+        "source_label": f"{latest_title_dict['title']} at {latest_title_dict['company']}",
+    }]
     judgment = judge_fn(target_role_title, evidence_chunks)
     match_level = judgment.get("match", "none")
     judge_reason = judgment.get("reason", "")
@@ -250,19 +245,8 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
         groundedness_warning = _reason_falsely_cites_jd_title(judge_reason, evidence_titles_text, target_role_title)
         
         if groundedness_warning:
-            best_jaccard = all_titles[0]["jaccard"] if all_titles else 0.0
-            if best_jaccard > 0.0:
-                match_level = "weak"
-                contribution = MATCH_LEVEL_CONTRIBUTION["weak"]
-                groundedness_warning += (
-                    f" Falling back to a 'weak' match instead of zeroing out entirely, since the "
-                    f"best-matching title ('{all_titles[0]['title']}') has independently-measured "
-                    f"token overlap (jaccard={best_jaccard}) with the JD title — a real, if modest, "
-                    f"signal the judge's fabricated reasoning didn't produce and can't discredit."
-                )
-            else:
-                match_level = "none"
-                contribution = 0.0
+            match_level = "none"
+            contribution = 0.0
 
     if contribution >= 1.0:
         status = "matched"
@@ -271,7 +255,8 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
     else:
         status = "missing"
 
-    best_match = dict(all_titles[0])
+    best_match = dict(latest_title_dict)
+    best_match["jaccard"] = round(overlap, 3)
     best_match["match_level"] = match_level
     best_match["judge_reason"] = judge_reason
 
