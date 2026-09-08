@@ -223,6 +223,18 @@ def _build_evidence(result: dict) -> list[dict]:
     return rows
 
 
+def _skill_coverage(result: dict) -> dict:
+    """Coverage metadata for presentation; it does not alter weighted scoring."""
+    total = len(result["results"])
+    matched = len(result["matched"])
+    return {
+        "required_count": total,
+        "matched_count": matched,
+        "match_percentage": round((matched / total * 100) if total else 100, 1),
+        "not_required": total == 0,
+    }
+
+
 def _extra_candidate_skills(candidate_skills: list[str], *results: dict, limit: int = 24) -> tuple[list[str], int]:
     """
     Extracts candidate skills not consumed by any JD requirement. Only exact
@@ -338,6 +350,7 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
             "matched": mandatory_result["matched"],
             "missing": mandatory_result["missing"],
             "gate_missing": gate_missing_mandatory,
+            **_skill_coverage(mandatory_result),
         },
         "relevant_experience": {"score": experience_score, "notes": experience_notes},
         "job_title_match": {"score": job_title_score, "notes": job_title_notes},
@@ -346,11 +359,13 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
             "score": round(soft_score, 2),
             "matched": soft_result["matched"],
             "missing": soft_result["missing"],
+            **_skill_coverage(soft_result),
         },
         "preferred_skills": {
             "score": round(pref_score, 2),
             "matched": pref_result["matched"],
             "missing": pref_result["missing"],
+            **_skill_coverage(pref_result),
         },
         # No JD education requirement likewise gives the full 20-point baseline.
         "education": {"score": education_score, "notes": education_notes},
