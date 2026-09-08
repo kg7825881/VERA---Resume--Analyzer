@@ -16,10 +16,47 @@ logger = logging.getLogger("talentlens.jd_extractor")
 # would only lose the sentence context that comparison relies on.
 _ATOMIC_SKILL_FIELDS = (
     "mandatory_skills",
+    "mandatory_domain_requirements",
+    "mandatory_role_specific_requirements",
     "preferred_technical_skills",
     "soft_preferred_skills",
     "industry_keywords",
     "relevant_certifications",
+)
+
+_REQUIRED_SECTION_RE = re.compile(
+    r"(?:required\s+(?:skills?\s*(?:&|and)\s*)?qualifications?|must[- ]have)\s*:?(.*?)(?:preferred\s+(?:skills?|qualifications?)|nice[- ]to[- ]have|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_DOMAIN_TERM_RE = re.compile(
+    r"\b(insurance|claims?|insurtech|banking|fintech|healthcare|retail|telecom|payments?)\b",
+    re.IGNORECASE,
+)
+
+_TECHNICAL_RECOVERY_RULES = (
+    (r"\betl\b", "ETL"),
+    (r"\belt\b", "ELT"),
+    (r"\bsql\b", "SQL"),
+    (r"\bpython\b", "Python"),
+    (r"\bdata\s+model(?:ing)?\b", "Data modeling"),
+    (r"\bschema\s+design\b", "Schema design"),
+    (r"\btransformation\s+logic\b", "Data transformation logic"),
+    (r"\bstructured\s+and\s+semi[-\s]?structured\s+data\b", "Structured and semi-structured data"),
+    (r"\bdata\s+warehouse\b", "Data warehouse"),
+    (r"\blakehouse\b", "Lakehouse design"),
+    (r"\bdata\s+validation\b", "Data validation"),
+    (r"\bdeduplicat\w*\b", "Deduplication"),
+    (r"\bconsistency\s+checks?\b", "Consistency checks"),
+    (r"\bdata\s+quality\s+control\b", "Data quality control"),
+    (r"\bdata\s+quality\s+checks?\b", "Data quality checks"),
+    (r"\bmonitoring\b", "Monitoring"),
+    (r"\balert(?:ing|s)?\b", "Alerting"),
+)
+
+_ROLE_RECOVERY_RULES = (
+    (r"\bml\b.*\brag\b.*\bevaluation\b", "ML/RAG-ready datasets"),
+    (r"\bdocument[-\s]?heavy\b.*\bworkflow[-\s]?heavy\b", "Document and workflow data handling"),
+    (r"\bcollaborat\w*\b.*\b(ai|backend|product)\b", "Cross-functional collaboration"),
 )
 
 # Data path set to local Kaggle directory
@@ -92,6 +129,141 @@ def _guard_against_fabricated_requirements(structured: dict, jd_text: str) -> li
     return warnings
 
 
+def _normalize_for_section_match(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (text or "").lower())).strip()
+
+
+def _required_section_text(jd_text: str) -> str:
+    """Return only the source JD's required-requirements section when it has
+    recognizable headings.  The model may classify a term incorrectly; the
+    source heading is the authority on whether it is mandatory."""
+    match = _REQUIRED_SECTION_RE.search(jd_text or "")
+    return match.group(1) if match else ""
+
+
+def _section_supports_item(item: str, section_text: str) -> bool:
+    item_tokens = set(re.findall(r"[a-z0-9]+", (item or "").lower()))
+    section_tokens = set(re.findall(r"[a-z0-9]+", (section_text or "").lower()))
+    return bool(item_tokens) and item_tokens.issubset(section_tokens)
+
+
+def _enforce_required_section_priority(structured: dict, jd_text: str) -> None:
+    """Promote extracted items found under the JD's Required section.  This
+    deterministic correction prevents an LLM from silently downgrading an
+    explicit required skill to a preferred one."""
+    required_text = _required_section_text(jd_text)
+    if not required_text:
+        return
+
+    mandatory_technical = list(structured.get("mandatory_skills", []) or [])
+    mandatory_domain = list(structured.get("mandatory_domain_requirements", []) or [])
+    for source_field in ("preferred_technical_skills", "soft_preferred_skills", "industry_keywords"):
+        retained = []
+        for item in structured.get(source_field, []) or []:
+            if not _section_supports_item(item, required_text):
+                retained.append(item)
+            elif _DOMAIN_TERM_RE.search(item):
+                mandatory_domain.append(item)
+            else:
+                mandatory_technical.append(item)
+        structured[source_field] = retained
+
+    structured["mandatory_skills"] = atomize_skill_list(mandatory_technical)
+    structured["mandatory_domain_requirements"] = atomize_skill_list(mandatory_domain)
+
+
+def _source_snippet(section_text: str, pattern: str, fallback: str) -> str:
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", section_text):
+        if re.search(pattern, sentence, re.IGNORECASE):
+            return re.sub(r"\s+", " ", sentence).strip()
+    return fallback
+
+
+def _dedupe_requirement_items(items: list) -> list:
+    seen, result = set(), []
+    for item in items:
+        key = (item or "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            result.append(item.strip())
+    return result
+
+
+def _recover_required_requirements(structured: dict, jd_text: str) -> None:
+    """Recover high-signal requirements directly from the Required section when
+    the model omitted them.  Each recovered item records its source sentence so
+    it remains reviewable rather than becoming an opaque heuristic."""
+    required_text = _required_section_text(jd_text)
+    if not required_text:
+        return
+
+    technical = list(structured.get("mandatory_skills", []) or [])
+    role_specific = list(structured.get("mandatory_role_specific_requirements", []) or [])
+    metadata = list(structured.get("requirement_metadata", []) or [])
+    existing = {item.lower() for item in technical + role_specific}
+
+    for pattern, label in _TECHNICAL_RECOVERY_RULES:
+        if re.search(pattern, required_text, re.IGNORECASE) and label.lower() not in existing:
+            technical.append(label)
+            existing.add(label.lower())
+            metadata.append({"item": label, "priority": "mandatory", "category": "technical", "source_section": "Required Skills & Qualifications", "source_text": _source_snippet(required_text, pattern, label), "recovered": True})
+
+    for pattern, label in _ROLE_RECOVERY_RULES:
+        if re.search(pattern, required_text, re.IGNORECASE) and label.lower() not in existing:
+            role_specific.append(label)
+            existing.add(label.lower())
+            metadata.append({"item": label, "priority": "mandatory", "category": "role_specific", "source_section": "Required Skills & Qualifications", "source_text": _source_snippet(required_text, pattern, label), "recovered": True})
+
+    # Recovered labels are deliberately compound concepts (for example,
+    # "Structured and semi-structured data") and must not be atomized again.
+    structured["mandatory_skills"] = _dedupe_requirement_items(technical)
+    structured["mandatory_role_specific_requirements"] = _dedupe_requirement_items(role_specific)
+    structured["requirement_metadata"] = metadata
+
+
+def _separate_preferred_technical_requirements(structured: dict) -> None:
+    """Keep named tools and technical concepts out of the role-specific bucket.
+    This is a deterministic correction for a common small-model category error."""
+    technical_pattern = re.compile(
+        r"\b(vector|embedding|retrieval|database|spark|dbt|airflow|dagster|kafka|ml|genai|access control|lineage|governance)\b",
+        re.IGNORECASE,
+    )
+    preferred = list(structured.get("preferred_technical_skills", []) or [])
+    role_specific = []
+    for item in structured.get("soft_preferred_skills", []) or []:
+        if technical_pattern.search(item):
+            preferred.append(item)
+        else:
+            role_specific.append(item)
+    structured["preferred_technical_skills"] = atomize_skill_list(preferred)
+    structured["soft_preferred_skills"] = atomize_skill_list(role_specific)
+
+
+def _normalize_mandatory_requirement_groups(structured: dict) -> None:
+    """Convert compound mandatory technical statements into atomic matchable
+    requirements.  A phrase such as "ETL or ELT pipelines in production" is
+    useful source prose, but matching must evaluate ETL and ELT independently.
+    """
+    technical_source = list(structured.get("mandatory_skills", []) or [])
+    role_source = list(structured.get("mandatory_role_specific_requirements", []) or [])
+    technical, role_specific = [], []
+
+    for item in technical_source + role_source:
+        matched_rules = [label for pattern, label in _TECHNICAL_RECOVERY_RULES if re.search(pattern, item, re.IGNORECASE)]
+        if matched_rules:
+            technical.extend(matched_rules)
+        elif role_labels := [label for pattern, label in _ROLE_RECOVERY_RULES if re.search(pattern, item, re.IGNORECASE)]:
+            role_specific.extend(role_labels)
+        elif item:
+            # Keep only genuine workflow/operating requirements here.  Technical
+            # phrases were moved above, so no compound technical tag leaks into
+            # the role-specific display or scoring path.
+            role_specific.append(item)
+
+    structured["mandatory_skills"] = _dedupe_requirement_items(technical)
+    structured["mandatory_role_specific_requirements"] = _dedupe_requirement_items(role_specific)
+
+
 def extract_structured_jd(jd_text):
     """Sends raw job description text to Qwen to extract structured JSON with strict limits."""
 
@@ -114,8 +286,15 @@ def extract_structured_jd(jd_text):
         "state one — it is not something to fill in.\n"
         "- If a field genuinely has no information in the JD, use an empty array or empty string — never invent content.\n\n"
         "CATEGORY RULES:\n"
+        "- mandatory_skills contains only explicitly mandatory technical skills, tools, and technologies.\n"
+        "- mandatory_domain_requirements contains only explicitly mandatory business-domain knowledge, such as insurance claims, "
+        "banking, fintech, healthcare, or retail. These are mandatory and must not be placed in preferred or industry_keywords.\n"
         "- industry_keywords is ONLY for business domains such as insurance, claims, banking, fintech, healthcare, or retail. "
         "Never place tools, programming languages, AI/ML, cloud platforms, frameworks, or databases in industry_keywords.\n"
+        "- Section headings are binding: every applicable item under 'Required Skills & Qualifications' MUST be placed in a mandatory "
+        "field. Only items under 'Preferred Qualifications' may be placed in preferred_technical_skills, soft_preferred_skills, or industry_keywords.\n"
+        "- mandatory_role_specific_requirements contains explicitly required workflows or operating capabilities, such as "
+        "document processing, dataset readiness for ML/RAG, or cross-functional collaboration.\n"
         "- soft_preferred_skills is for role-specific workflow, operating, and collaboration requirements. It is displayed "
         "as 'Role-Specific Requirements', not as personality traits.\n\n"
         "ATOMIC SKILL EXTRACTION (applies to mandatory_skills, preferred_technical_skills, "
@@ -144,6 +323,8 @@ def extract_structured_jd(jd_text):
         '  "role_title": "string",\n'
         '  "department": "string",\n'
         '  "mandatory_skills": ["string", "string"],\n'
+        '  "mandatory_domain_requirements": ["string", "string"],\n'
+        '  "mandatory_role_specific_requirements": ["string", "string"],\n'
         '  "preferred_technical_skills": ["string", "string"],\n'
         '  "soft_preferred_skills": ["string", "string"],\n'
         '  "industry_keywords": ["string", "string"],\n'
@@ -184,6 +365,11 @@ def extract_structured_jd(jd_text):
     for field in _ATOMIC_SKILL_FIELDS:
         if field in structured and isinstance(structured[field], list):
             structured[field] = atomize_skill_list(structured[field])
+
+    _enforce_required_section_priority(structured, jd_text)
+    _recover_required_requirements(structured, jd_text)
+    _normalize_mandatory_requirement_groups(structured)
+    _separate_preferred_technical_requirements(structured)
 
     # Move technologies accidentally extracted as domains into the technical
     # preference list, where they are scored and displayed separately.
