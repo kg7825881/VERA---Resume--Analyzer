@@ -268,7 +268,12 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
     evidence_index = CandidateEvidenceIndex(candidate_data)
 
     # --- Mandatory Skills (exact match earns free credit; otherwise evidence-based) ---
-    jd_mandatory_skills = jd_data.get("mandatory_skills", [])
+    jd_mandatory_technical = jd_data.get("mandatory_skills", [])
+    jd_mandatory_domain = jd_data.get("mandatory_domain_requirements", [])
+    jd_mandatory_role_specific = jd_data.get("mandatory_role_specific_requirements", [])
+    # Both lists are hard requirements.  They are scored together for a single,
+    # consistent gate, while their evidence remains separate for reviewers.
+    jd_mandatory_skills = jd_mandatory_technical + jd_mandatory_domain + jd_mandatory_role_specific
     mandatory_result = score_skill_list(
         jd_mandatory_skills, candidate_skills, evidence_index, judge_fn, exact_only=False
     )
@@ -349,7 +354,15 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
     final_score = round(sum(c["score"] for c in category_scores.values()), 2)
 
     evidence = {
-        "mandatory_skills": _build_evidence(mandatory_result),
+        "mandatory_technical_skills": [
+            row for row in _build_evidence(mandatory_result) if row["skill"] in jd_mandatory_technical
+        ],
+        "mandatory_domain_requirements": [
+            row for row in _build_evidence(mandatory_result) if row["skill"] in jd_mandatory_domain
+        ],
+        "mandatory_role_specific_requirements": [
+            row for row in _build_evidence(mandatory_result) if row["skill"] in jd_mandatory_role_specific
+        ],
         "preferred_skills": _build_evidence(pref_result),
         "soft_skills": _build_evidence(soft_result),
         "industry_keywords": _build_evidence(industry_result),
