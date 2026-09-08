@@ -182,11 +182,11 @@ export default function ScreenPage() {
     setStatusText(`Analyzing ${successfulCandidates.length} resume(s)…`);
     runStepAnimation();
 
-    const roleQuery = activeRole.role_title;
+    const roleId = activeRole.role_id;
     const candidateIds = successfulCandidates.map((r) => r.candidate_id);
 
     try {
-      const result = await analyze(roleQuery, candidateIds);
+      const result = await analyze(roleId, candidateIds);
 
       if (result.status === "ambiguous") {
         clearInterval(stepTimerRef.current);
