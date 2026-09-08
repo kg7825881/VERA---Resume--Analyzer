@@ -6,10 +6,9 @@
 export const CATEGORY_MAX = {
   mandatory_skills: 30,
   relevant_experience: 20,
-  education: 20,
-  industry_keywords: 10,
+  education: 25,
   soft_skills: 10,
-  job_title_match: 5,
+  job_title_match: 10,
   preferred_skills: 5,
 };
 
@@ -17,7 +16,6 @@ export const CATEGORY_LABELS = {
   mandatory_skills: "Mandatory Skills",
   relevant_experience: "Experience",
   education: "Education",
-  industry_keywords: "Domain Experience",
   soft_skills: "Role-Specific Requirements",
   job_title_match: "Job Title Match",
   preferred_skills: "Preferred Skills",
@@ -96,7 +94,6 @@ export function evidenceList(record) {
     ["mandatory_skills", "Mandatory"],
     ["preferred_skills", "Preferred"],
     ["soft_skills", "Role-Specific Requirements"],
-    ["industry_keywords", "Domain Experience"],
   ];
   const items = [];
   for (const [key, label] of cats) {
@@ -129,10 +126,9 @@ export function evidenceSections(record) {
     { key: "mandatory_technical_skills", label: "Mandatory Technical Skills", items: (ev.mandatory_technical_skills || ev.mandatory_skills || []).map(mapSkillRow) },
     { key: "mandatory_domain_requirements", label: "Mandatory Domain Requirements", items: (ev.mandatory_domain_requirements || []).map(mapSkillRow) },
     { key: "mandatory_role_specific_requirements", label: "Mandatory Role-Specific Requirements", items: (ev.mandatory_role_specific_requirements || []).map(mapSkillRow) },
-    { key: "industry_keywords", label: "Domain Experience", items: (ev.industry_keywords || []).map(mapSkillRow) },
     { key: "soft_skills", label: "Role-Specific Requirements", items: (ev.soft_skills || []).map(mapSkillRow) },
     { key: "preferred_skills", label: "Preferred Skills", items: (ev.preferred_skills || []).map(mapSkillRow) },
-  ];
+  ].filter((section) => section.items.length > 0);
 
   const experienceEv = ev.experience || {};
   const experienceRoles = (experienceEv.roles || []).map((r) => ({
@@ -165,6 +161,7 @@ export function evidenceSections(record) {
     jobTitle: ev.job_title || null,
     education: educationItems,
     additionalSkills: ev.additional_candidate_skills || [],
+    additionalSkillsTotal: ev.additional_candidate_skills_total || 0,
   };
 }
 
