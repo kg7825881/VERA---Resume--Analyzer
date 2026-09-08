@@ -27,6 +27,7 @@ def init_db():
                 mandatory_skills TEXT,
                 preferred_technical_skills TEXT,
                 soft_preferred_skills TEXT,
+                industry_keywords TEXT,
                 min_years_experience REAL,
                 education_requirements TEXT,
                 relevant_certifications TEXT,
@@ -43,6 +44,8 @@ def init_db():
                 document_id TEXT,
                 candidate_name TEXT,
                 skills TEXT,
+                skills_all_sources TEXT,
+                current_role_title_from_summary TEXT,
                 total_years_experience REAL,
                 experience TEXT,
                 education TEXT,
@@ -77,6 +80,18 @@ def init_db():
         if "evidence" not in existing_cols:
             conn.execute("ALTER TABLE scores ADD COLUMN evidence TEXT")
 
+        # These fields are used by matching after ingestion.  Keep migrations here so
+        # an existing local database gains the same data model as a fresh install.
+        jd_cols = {row["name"] for row in conn.execute("PRAGMA table_info(jds)").fetchall()}
+        if "industry_keywords" not in jd_cols:
+            conn.execute("ALTER TABLE jds ADD COLUMN industry_keywords TEXT")
+
+        resume_cols = {row["name"] for row in conn.execute("PRAGMA table_info(resumes)").fetchall()}
+        if "skills_all_sources" not in resume_cols:
+            conn.execute("ALTER TABLE resumes ADD COLUMN skills_all_sources TEXT")
+        if "current_role_title_from_summary" not in resume_cols:
+            conn.execute("ALTER TABLE resumes ADD COLUMN current_role_title_from_summary TEXT")
+
 
 @contextmanager
 def _connect():
@@ -101,14 +116,14 @@ def insert_jd(record: dict):
         conn.execute("""
             INSERT OR REPLACE INTO jds
             (role_id, document_id, role_title, department, mandatory_skills, preferred_technical_skills,
-             soft_preferred_skills, min_years_experience, education_requirements, relevant_certifications,
-             responsibilities, file_name, extraction_method, extraction_warnings, uploaded_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             soft_preferred_skills, industry_keywords, min_years_experience, education_requirements,
+             relevant_certifications, responsibilities, file_name, extraction_method, extraction_warnings, uploaded_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             record["role_id"], record["document_id"], record.get("role_title", ""),
             record.get("department", ""), _dumps(record.get("mandatory_skills")),
             _dumps(record.get("preferred_technical_skills")), _dumps(record.get("soft_preferred_skills")),
-            record.get("min_years_experience", 0), _dumps(record.get("education_requirements")),
+            _dumps(record.get("industry_keywords")), record.get("min_years_experience", 0), _dumps(record.get("education_requirements")),
             _dumps(record.get("relevant_certifications")), _dumps(record.get("responsibilities")),
             record.get("file_name", ""), record.get("extraction_method", ""),
             _dumps(record.get("extraction_warnings")), record.get("uploaded_at", ""),
@@ -119,12 +134,14 @@ def insert_resume(record: dict):
     with _connect() as conn:
         conn.execute("""
             INSERT OR REPLACE INTO resumes
-            (candidate_id, document_id, candidate_name, skills, total_years_experience, experience,
-             education, certifications, projects, file_name, extraction_method, extraction_warnings, uploaded_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            (candidate_id, document_id, candidate_name, skills, skills_all_sources, current_role_title_from_summary,
+             total_years_experience, experience, education, certifications, projects, file_name, extraction_method,
+             extraction_warnings, uploaded_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             record["candidate_id"], record["document_id"], record.get("candidate_name", ""),
-            _dumps(record.get("skills")), record.get("total_years_experience", 0),
+            _dumps(record.get("skills")), _dumps(record.get("skills_all_sources")),
+            record.get("current_role_title_from_summary", ""), record.get("total_years_experience", 0),
             _dumps(record.get("experience")), _dumps(record.get("education")),
             _dumps(record.get("certifications")), _dumps(record.get("projects")),
             record.get("file_name", ""), record.get("extraction_method", ""),
@@ -161,7 +178,7 @@ def get_jd_by_role_id(role_id: str) -> dict | None:
 
 def _row_to_jd_dict(row) -> dict:
     d = dict(row)
-    for field in ["mandatory_skills", "preferred_technical_skills", "soft_preferred_skills",
+    for field in ["mandatory_skills", "preferred_technical_skills", "soft_preferred_skills", "industry_keywords",
                   "education_requirements", "relevant_certifications", "responsibilities", "extraction_warnings"]:
         d[field] = json.loads(d[field]) if d[field] else []
     return d
@@ -179,7 +196,7 @@ def get_resumes(candidate_ids: list[str] = None) -> list[dict]:
 
 def _row_to_resume_dict(row) -> dict:
     d = dict(row)
-    for field in ["skills", "experience", "education", "certifications", "projects", "extraction_warnings"]:
+    for field in ["skills", "skills_all_sources", "experience", "education", "certifications", "projects", "extraction_warnings"]:
         d[field] = json.loads(d[field]) if d[field] else []
     return d
 
