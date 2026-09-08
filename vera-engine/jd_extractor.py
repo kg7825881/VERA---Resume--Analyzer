@@ -18,6 +18,7 @@ _ATOMIC_SKILL_FIELDS = (
     "mandatory_skills",
     "preferred_technical_skills",
     "soft_preferred_skills",
+    "industry_keywords",
     "relevant_certifications",
 )
 
@@ -112,8 +113,13 @@ def extract_structured_jd(jd_text):
         "empty array. A missing requirement in the output is correct and expected when the source document doesn't "
         "state one — it is not something to fill in.\n"
         "- If a field genuinely has no information in the JD, use an empty array or empty string — never invent content.\n\n"
+        "CATEGORY RULES:\n"
+        "- industry_keywords is ONLY for business domains such as insurance, claims, banking, fintech, healthcare, or retail. "
+        "Never place tools, programming languages, AI/ML, cloud platforms, frameworks, or databases in industry_keywords.\n"
+        "- soft_preferred_skills is for role-specific workflow, operating, and collaboration requirements. It is displayed "
+        "as 'Role-Specific Requirements', not as personality traits.\n\n"
         "ATOMIC SKILL EXTRACTION (applies to mandatory_skills, preferred_technical_skills, "
-        "soft_preferred_skills, and relevant_certifications):\n"
+        "soft_preferred_skills, industry_keywords, and relevant_certifications):\n"
         "- Each array item must be ONE atomic skill, tool, technology, or named concept — NEVER a full "
         "requirement sentence. A JD line commonly bundles several skills into one sentence; split it into "
         "one entry per named skill/tool/concept instead of keeping the sentence whole. Examples:\n"
@@ -140,6 +146,7 @@ def extract_structured_jd(jd_text):
         '  "mandatory_skills": ["string", "string"],\n'
         '  "preferred_technical_skills": ["string", "string"],\n'
         '  "soft_preferred_skills": ["string", "string"],\n'
+        '  "industry_keywords": ["string", "string"],\n'
         '  "min_years_experience": number,\n'
         '  "education_requirements": [\n'
         '    { "degree_level": "string", "field": "string", "required": boolean }\n'
@@ -177,6 +184,19 @@ def extract_structured_jd(jd_text):
     for field in _ATOMIC_SKILL_FIELDS:
         if field in structured and isinstance(structured[field], list):
             structured[field] = atomize_skill_list(structured[field])
+
+    # Move technologies accidentally extracted as domains into the technical
+    # preference list, where they are scored and displayed separately.
+    industry = structured.get("industry_keywords", []) or []
+    technical_pattern = re.compile(
+        r"\\b(ai|ml|machine learning|java|kotlin|angular|node(?:\\.js)?|cloud|database|sql|python|spark|airflow|kafka|blockchain|api)\\b",
+        re.IGNORECASE,
+    )
+    technical_context = [item for item in industry if technical_pattern.search(item)]
+    structured["industry_keywords"] = [item for item in industry if item not in technical_context]
+    structured["preferred_technical_skills"] = atomize_skill_list(
+        (structured.get("preferred_technical_skills", []) or []) + technical_context
+    )
 
     # Deterministic safety net #2 — confirmed in production the model fabricates
     # min_years_experience/education_requirements for terse JDs that don't state them.
