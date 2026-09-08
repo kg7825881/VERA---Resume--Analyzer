@@ -25,9 +25,12 @@ def init_db():
                 role_title TEXT,
                 department TEXT,
                 mandatory_skills TEXT,
+                mandatory_domain_requirements TEXT,
+                mandatory_role_specific_requirements TEXT,
                 preferred_technical_skills TEXT,
                 soft_preferred_skills TEXT,
                 industry_keywords TEXT,
+                requirement_metadata TEXT,
                 min_years_experience REAL,
                 education_requirements TEXT,
                 relevant_certifications TEXT,
@@ -85,6 +88,12 @@ def init_db():
         jd_cols = {row["name"] for row in conn.execute("PRAGMA table_info(jds)").fetchall()}
         if "industry_keywords" not in jd_cols:
             conn.execute("ALTER TABLE jds ADD COLUMN industry_keywords TEXT")
+        if "mandatory_domain_requirements" not in jd_cols:
+            conn.execute("ALTER TABLE jds ADD COLUMN mandatory_domain_requirements TEXT")
+        if "mandatory_role_specific_requirements" not in jd_cols:
+            conn.execute("ALTER TABLE jds ADD COLUMN mandatory_role_specific_requirements TEXT")
+        if "requirement_metadata" not in jd_cols:
+            conn.execute("ALTER TABLE jds ADD COLUMN requirement_metadata TEXT")
 
         resume_cols = {row["name"] for row in conn.execute("PRAGMA table_info(resumes)").fetchall()}
         if "skills_all_sources" not in resume_cols:
@@ -115,15 +124,17 @@ def insert_jd(record: dict):
     with _connect() as conn:
         conn.execute("""
             INSERT OR REPLACE INTO jds
-            (role_id, document_id, role_title, department, mandatory_skills, preferred_technical_skills,
-             soft_preferred_skills, industry_keywords, min_years_experience, education_requirements,
+            (role_id, document_id, role_title, department, mandatory_skills, mandatory_domain_requirements, mandatory_role_specific_requirements, preferred_technical_skills,
+             soft_preferred_skills, industry_keywords, requirement_metadata, min_years_experience, education_requirements,
              relevant_certifications, responsibilities, file_name, extraction_method, extraction_warnings, uploaded_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             record["role_id"], record["document_id"], record.get("role_title", ""),
             record.get("department", ""), _dumps(record.get("mandatory_skills")),
+            _dumps(record.get("mandatory_domain_requirements")),
+            _dumps(record.get("mandatory_role_specific_requirements")),
             _dumps(record.get("preferred_technical_skills")), _dumps(record.get("soft_preferred_skills")),
-            _dumps(record.get("industry_keywords")), record.get("min_years_experience", 0), _dumps(record.get("education_requirements")),
+            _dumps(record.get("industry_keywords")), _dumps(record.get("requirement_metadata")), record.get("min_years_experience", 0), _dumps(record.get("education_requirements")),
             _dumps(record.get("relevant_certifications")), _dumps(record.get("responsibilities")),
             record.get("file_name", ""), record.get("extraction_method", ""),
             _dumps(record.get("extraction_warnings")), record.get("uploaded_at", ""),
@@ -178,7 +189,7 @@ def get_jd_by_role_id(role_id: str) -> dict | None:
 
 def _row_to_jd_dict(row) -> dict:
     d = dict(row)
-    for field in ["mandatory_skills", "preferred_technical_skills", "soft_preferred_skills", "industry_keywords",
+    for field in ["mandatory_skills", "mandatory_domain_requirements", "mandatory_role_specific_requirements", "preferred_technical_skills", "soft_preferred_skills", "industry_keywords", "requirement_metadata",
                   "education_requirements", "relevant_certifications", "responsibilities", "extraction_warnings"]:
         d[field] = json.loads(d[field]) if d[field] else []
     return d
