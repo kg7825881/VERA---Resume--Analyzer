@@ -4,7 +4,7 @@ import Sidebar from "../components/Sidebar";
 import TopBar from "../components/TopBar";
 
 export const metadata = {
-  title: "TalentLens — AI Resume Screening",
+  title: "VERA",
   description: "Screen candidates against a job description in minutes, with an explainable ranking.",
 };
 
