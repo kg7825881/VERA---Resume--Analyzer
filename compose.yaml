@@ -7,7 +7,7 @@ services:
       - "8000:8000"
     environment:
       OLLAMA_HOST: http://host.docker.internal:11434
-      TALENTLENS_FRONTEND_ORIGINS: http://localhost:3000
+      TALENTLENS_FRONTEND_ORIGINS: http://localhost:3000,https://vera-resume-analyzer.vercel.app
       TALENTLENS_DB_PATH: /data/VERA.db
     extra_hosts:
       - "host.docker.internal:host-gateway"
