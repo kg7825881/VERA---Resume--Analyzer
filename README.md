@@ -129,6 +129,21 @@ The frontend dashboard will be accessible at `http://localhost:3000`.
    launchctl setenv OLLAMA_HOST "0.0.0.0"
    # Quit Ollama from menu bar and restart it
 ```
+
+### Run frontend and backend together
+
+From the repository root, Docker can now start both services:
+
+```bash
+docker compose up --build -d
+```
+
+Open the dashboard at `http://localhost:3000`. The API remains available at
+`http://localhost:8000`; the frontend is built to use that address from your browser.
+
+The compose setup keeps the SQLite database and uploaded files in Docker volumes. To
+stop the app, run `docker compose down`. Add `-v` only if you intentionally want to
+delete the stored database and uploaded documents.
  
 2. **Build the image:**
 ```bash
@@ -161,7 +176,7 @@ The frontend dashboard will be accessible at `http://localhost:3000`.
    * Set Environment Variable:
      * `NEXT_PUBLIC_API_BASE_URL`: `https://your-ngrok-url.ngrok-free.dev`
 3. **Configure Backend CORS:**
-   * Pass your Vercel deployment URL into `TALENTLENS_FRONTEND_ORIGINS`.
+   * Pass your Vercel deployment URL into `VERA_FRONTEND_ORIGINS`.
 
  
 ## ⚙️ Environment Variables Reference
@@ -170,7 +185,7 @@ The frontend dashboard will be accessible at `http://localhost:3000`.
 | :--- | :--- | :--- | :--- |
 | `NEXT_PUBLIC_API_BASE_URL` | Frontend | Base URL for FastAPI backend | `http://localhost:8000` |
 | `OLLAMA_HOST` | Backend | Host address for Ollama instance | `http://127.0.0.1:11434` |
-| `TALENTLENS_FRONTEND_ORIGINS` | Backend | Allowed CORS origins (comma-separated) | `http://localhost:3000` |
+| `VERA_FRONTEND_ORIGINS` | Backend | Allowed CORS origins (comma-separated) | `http://localhost:3000` |
  
 
 ## 📖 Usage & Workflows

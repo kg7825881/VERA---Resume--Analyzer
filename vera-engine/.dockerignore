@@ -3,5 +3,5 @@ __pycache__/
 .env
 venv/
 storage/
-talentlens.db
+VERA.db
 .DS_Store

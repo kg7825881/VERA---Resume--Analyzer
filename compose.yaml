@@ -1,0 +1,31 @@
+services:
+  backend:
+    build:
+      context: ./vera-engine
+    image: resume-analyzer-backend
+    ports:
+      - "8000:8000"
+    environment:
+      OLLAMA_HOST: http://host.docker.internal:11434
+      TALENTLENS_FRONTEND_ORIGINS: http://localhost:3000
+      TALENTLENS_DB_PATH: /data/VERA.db
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - backend-db:/data
+      - backend-storage:/app/storage
+
+  frontend:
+    build:
+      context: ./vera-frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    image: resume-analyzer-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+
+volumes:
+  backend-db:
+  backend-storage:

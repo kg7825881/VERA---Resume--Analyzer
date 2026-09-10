@@ -9,11 +9,6 @@ __pycache__/
 venv/
 env/
 
-# Environment variables and secrets
-.env
-.env.*
-!.env.example
-
 # Local session file
 :memory:.ses
 
@@ -32,3 +27,32 @@ htmlcov/
 # IDE and OS files
 .vscode/
 .DS_Store
+
+# macOS / editor
+.DS_Store
+.vscode/
+*.ses
+
+# Python
+vera-engine/venv/
+vera-engine/__pycache__/
+vera-engine/**/*.py[cod]
+vera-engine/.pytest_cache/
+
+# Local backend data and uploaded candidate/JD documents
+vera-engine/VERA.db
+vera-engine/storage/jds/*
+vera-engine/storage/resumes/*
+
+# Frontend build and dependencies
+vera-frontend/node_modules/
+vera-frontend/.next/
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Docker local overrides
+compose.override.yaml
