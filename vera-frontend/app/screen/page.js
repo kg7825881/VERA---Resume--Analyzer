@@ -7,11 +7,11 @@ import { useAppState, useToast } from "../providers";
 import JDSummaryCard from "../../components/JDSummaryCard";
 
 const STEPS = [
-  { key: "jd", title: "Parse Job Description", detail: "Extract mandatory and preferred requirements" },
-  { key: "resumes", title: "Understand resumes", detail: "Extract skills, experience, projects and education" },
-  { key: "matching", title: "Semantic matching", detail: "Compare evidence against JD clauses" },
-  { key: "scoring", title: "Calculate Job Fit Scores", detail: "Apply deterministic weighted scoring" },
-  { key: "ranking", title: "Rank candidates", detail: "Generate explainable shortlist" },
+  { key: "jd", title: "Parse Job Description", detail: " (Extract mandatory and preferred requirements)" },
+  { key: "resumes", title: "Understand resumes", detail: " (Extract skills, experience, projects and education)" },
+  { key: "matching", title: "Semantic matching", detail: " (Compare evidence against JD clauses)" },
+  { key: "scoring", title: "Calculate Job Fit Scores", detail: " (Apply deterministic weighted scoring)" },
+  { key: "ranking", title: "Rank candidates", detail: " (Generate explainable shortlist)" },
 ];
 
 export default function ScreenPage() {
@@ -231,7 +231,7 @@ export default function ScreenPage() {
             <div className="ey">AI-powered recruitment workflow</div>
             <h1>Screen candidates in minutes.</h1>
             <p>
-              Upload one JD and a batch of resumes. TalentLens extracts requirements, understands
+              Upload one JD and a batch of resumes. VERA extracts requirements, understands
               candidate experience, and produces an explainable ranking.
             </p>
           </div>
