@@ -22,9 +22,9 @@ export default function Sidebar() {
   return (
     <aside className="side">
       <div className="logo">
-        <div className="mark">TL</div>
+        <div className="mark">VERA</div>
         <div>
-          <b>TalentLens</b>
+          <b>VERA</b>
           <small>AI Screening Agent</small>
         </div>
       </div>
