@@ -1,210 +1,164 @@
-"""
-jd_skills.py — deterministic safety net for atomic skill extraction from JD text.
+"""Deterministic JD skill normalisation and extraction helpers.
 
-jd_extractor.py's LLM prompt already instructs the model to split compound requirement
-sentences into one atomic skill per array item (see the ATOMIC SKILL EXTRACTION section
-of its system prompt). Confirmed in production: a 3B model doing this as one part of a
-large multi-field JSON extraction doesn't reliably follow that instruction — several JD
-lines came through as full unsplit sentences even with the instruction present (e.g.
-"Strong SQL and good Python skills." stayed as one pill instead of splitting into SQL
-and Python).
-
-This module is a deterministic second pass, run AFTER the LLM call, that doesn't depend
-on the model following the instruction. It's intentionally conservative: splitting a JD
-sentence is a genuinely hard general problem (nested clauses, shared prepositional
-phrases, nothing as clean as extractor.py's "Tools Used –" comma lists), so where a line
-can't be split SAFELY, this keeps it as one item rather than guessing and producing
-nonsense fragments. A single non-atomic item just semantic-matches a bit more weakly in
-matcher.py; a fabricated fragment like "reliable datasets for ML" would never match
-anything, permanently penalizing every candidate for a requirement that isn't real.
+This module deliberately contains no model calls.  The extractor supplies text from a
+known JD section and these functions return stable, first-seen ordered labels.
 """
+from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 
-# Filler phrasing that precedes the actual skill(s) in a JD requirement sentence.
-# Longest/most specific patterns first so a more specific match wins over a generic one.
-_FILLER_PREFIXES = [
-    r"hands[- ]on experience (?:with|in|building)\s+",
-    r"strong understanding of\s+",
-    r"strong knowledge of\s+",
-    r"solid understanding of\s+",
-    r"deep understanding of\s+",
-    r"working knowledge of\s+",
-    r"proven experience (?:with|in)\s+",
-    r"demonstrated experience (?:with|in)\s+",
-    r"experience working (?:with|in)\s+",
-    r"experience (?:with|in|using|building|supporting)\s+",
-    r"familiarity with\s+",
-    r"exposure to\s+",
-    r"knowledge of\s+",
-    r"understanding of\s+",
-    r"proficiency (?:with|in)\s+",
-    r"expertise (?:with|in)\s+",
-    r"comfort(?:able)? working with\s+",
-    r"ability to\s+",
-    r"strong\s+",
-    r"good\s+",
-]
-_FILLER_PREFIX_RE = re.compile("^(?:" + "|".join(_FILLER_PREFIXES) + ")", re.IGNORECASE)
 
-_YEARS_EXPERIENCE_RE = re.compile(
-    r"^\s*\d+[\+\-]?\s*(?:to|-)?\s*\d*\+?\s*years?\s+of\s+experience", re.IGNORECASE
+_FILLER = re.compile(
+    r"^(?:strong|good|solid|hands[- ]on|proven|demonstrated|working)\s+"
+    r"(?:experience|knowledge|understanding|skills?|proficiency|expertise)?\s*"
+    r"(?:with|in|of|using|building)?\s*",
+    re.I,
 )
 
-_EDUCATION_CLAUSE_RE = re.compile(
-    r"^\s*(?:must have |requires |required: |education: |minimum |degree in )?(?:bachelor(?:'s)?|master(?:'s)?|b\.?\s*tech|m\.?\s*tech|b\.?\s*e\.?|b\.?\s*s\.?|b\.?\s*sc|m\.?\s*s\.?|m\.?\s*sc|mba|mca|bca|ph\.?d|degree|diploma)\b", 
-    re.IGNORECASE
+# Canonical labels are intentionally explicit: adding a term is a reviewable code
+# change instead of an LLM silently expanding a hard requirement.
+SKILL_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("SQL", r"\bsql\b"), ("Python", r"\bpython\b"),
+    ("ETL", r"\betl\b"), ("ELT", r"\belt\b"),
+    ("Data modeling", r"\bdata model(?:ing)?\b"),
+    ("Schema design", r"\bschema design\b"),
+    ("Data transformation logic", r"\b(?:data )?transformation logic\b"),
+    ("Structured and semi-structured data", r"\bstructured(?:\s+and\s+|/)semi[- ]structured data\b"),
+    ("Data warehouse", r"\bdata warehouse\b"), ("Lakehouse", r"\blakehouse\b"),
+    ("Data validation", r"\bdata validation\b"), ("Deduplication", r"\bdeduplicat\w*\b"),
+    ("Consistency checks", r"\bconsistency checks?\b"),
+    ("Data quality control", r"\bdata quality control\b"),
+    ("Data quality checks", r"\bdata quality checks?\b"),
+    ("Monitoring", r"\bmonitoring\b"), ("Alerting", r"\balert(?:ing|s)?\b"),
+    ("Spark", r"\b(?:apache )?spark\b"), ("dbt", r"\bdbt\b"),
+    ("Airflow", r"\bairflow\b"), ("Dagster", r"\bdagster\b"),
+    ("Kafka", r"\bkafka\b"), ("OCR", r"\bocr\b|optical character recognition"),
+    ("Vector databases", r"\bvector databases?\b"),
+    ("Embedding pipelines", r"\bembedding pipelines?\b"),
+    ("Retrieval datasets", r"\bretrieval datasets?\b"),
+    ("Data lineage", r"\bdata lineage\b"), ("Data governance", r"\bdata governance\b"),
+    ("Access control", r"\baccess control\b"),
+    ("Java", r"\bjava\b"), ("Spring Boot", r"\bspring boot\b"),
+    ("Microservices", r"\bmicroservices?\b"), ("REST APIs", r"\brest(?:ful)? APIs?\b"),
+    ("Distributed systems", r"\bdistributed systems?\b"),
+    ("Event-driven architecture", r"\bevent[- ]driven architecture\b"),
+    ("Cloud-native architecture", r"\bcloud[- ]native architecture\b"),
+    ("DevOps", r"\bdevops\b"), ("Docker", r"\bdocker\b"),
+    ("Kubernetes", r"\bkubernetes\b"), ("Helm", r"\bhelm charts?\b"),
+    ("Istio", r"\bistio\b"), ("Linkerd", r"\blinkerd\b"),
+    ("Infrastructure as Code", r"\b(?:infrastructure as code|iac)\b"),
+    ("Argo CD", r"\bargo cd\b"), ("GitOps", r"\bgitops\b"),
+    ("Blue-Green deployments", r"\bblue[- ]green\b"), ("Canary deployments", r"\bcanary\b"),
+    ("Prometheus", r"\bprometheus\b"), ("Grafana", r"\bgrafana\b"),
+    ("Loki", r"\bloki\b"), ("ELK/OpenSearch", r"\b(?:elk|opensearch)\b"),
+    ("OpenTelemetry", r"\bopen telemetry\b"), ("GitHub Copilot", r"\bgithub copilot\b"),
+    ("ChatGPT", r"\bchatgpt\b"),
+    ("Claude", r"\bclaude\b"), ("Cursor", r"\bcursor\b"),
+    ("Agile", r"\bagile\b"), ("SaaS", r"\bsaas\b"),
+    ("Guidewire ClaimCenter", r"\bguidewire claimcenter\b"),
+    ("Duck Creek", r"\bduck creek\b"), ("Origami Risk", r"\borigami risk\b"),
+    ("Machine learning", r"\bmachine learning\b"), ("Analytics", r"\banalytics\b"),
+    ("Intelligent automation", r"\bintelligent automation\b"),
+    # AI/data concepts that are explicitly named requirements, not free-text duties.
+    ("Machine learning", r"\b(?:machine learning|\bml\b)"),
+    ("RAG", r"\brag\b|retrieval[- ]augmented generation"),
+    ("GenAI", r"\bgenai\b|generative ai"), ("Model evaluation", r"\bmodel evaluation\b|\bevaluation\b"),
+    ("Unstructured data", r"\bunstructured data\b"),
+    # Kubernetes and delivery vocabulary
+    ("Networking", r"\bnetworking\b"), ("Ingress controllers", r"\bingress controllers?\b"),
+    ("Storage classes", r"\bstorage classes?\b"), ("Autoscaling", r"\bautoscaling\b"),
+    ("RBAC", r"\brbac\b"), ("Namespaces", r"\bnamespaces\b"),
+    ("Kubernetes Operators", r"\bkubernetes operators?\b"), ("Service mesh", r"\bservice mesh\b"),
+    ("Infrastructure provisioning", r"\binfrastructure provisioning\b"),
+    ("Lifecycle management", r"\blifecycle management\b"), ("Rollbacks", r"\brollbacks?\b"),
+    ("Release orchestration", r"\brelease orchestration\b"),
+    ("Kubernetes deployment automation", r"\bkubernetes deployment automation\b"),
+    ("Build automation", r"\bbuild automation\b"), ("Release automation", r"\brelease automation\b"),
+    ("Artifact management", r"\bartifact management\b"),
+    ("Secure software supply chain", r"\bsecure software supply chain\b"),
+    ("Pipeline optimization", r"\bpipeline optimization\b"),
+    ("Cloud-agnostic architecture", r"\bcloud[- ]agnostic solutions?\b"),
+    ("Observability", r"\bobservability\b"), ("Security", r"\bsecurity\b"),
+)
+DOMAIN_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("Insurance", r"\binsurance\b"), ("Property & Casualty", r"\bproperty (?:&|and) casualty\b"),
+    ("Claims", r"\bclaims?\b"), ("Auto claims", r"\bauto claims?\b"),
+    ("Property claims", r"\bproperty claims?\b"), ("Recovery operations", r"\brecovery operations\b"),
+    ("Subrogation", r"\bsubrogation\b"), ("Fintech", r"\bfintech\b"),
+    ("Banking", r"\bbanking\b"), ("Healthcare", r"\bhealthcare\b"),
+    ("Retail", r"\bretail\b"), ("Telecom", r"\btelecom\b"),
+    ("Payments", r"\bpayments?\b"),
+)
+ROLE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("Document processing", r"\bdocument (?:processing|ingestion|parsing|normalization)\b"),
+    ("Metadata extraction", r"\bmetadata extraction\b"),
+    ("Data traceability", r"\b(?:data )?traceability\b"),
+    ("Cross-functional collaboration", r"\bcross[- ]functional collaboration\b"),
+    ("Document-heavy data", r"\bdocument[- ]heavy\b"),
+    ("Executive workshops", r"\bexecutive.*workshops?\b"),
+    ("Client-facing workshops", r"\bclient[- ]facing workshops?\b"),
+    ("Communication", r"\bstrong communication\b"),
 )
 
-def _looks_like_education_clause(sentence: str) -> bool:
-    return bool(_EDUCATION_CLAUSE_RE.match(sentence.strip()))
-
-# Fragments ending in a bare role/team noun ("AI engineers", "product teams") — a
-# collaborate-with-people clause, not a skill. Confirmed necessary: JDs commonly phrase
-# soft requirements as "collaborate with X engineers, Y engineers, and Z teams", which
-# splits grammatically cleanly but produces useless, permanently-unmatchable "skills".
-_ROLE_NOUN_SUFFIX_RE = re.compile(
-    r"^(?:[A-Za-z]+\s+)?(?:engineers?|developers?|scientists?|analysts?|managers?|"
-    r"teams?|stakeholders?|leads?|panelists?|members?)$",
-    re.IGNORECASE,
+# Explicit titles mentioned in a Required section are stored separately from skills.
+# They define acceptable candidate-title targets for downstream title matching.
+TARGET_TITLE_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("Business Analyst", r"\bbusiness analyst\b"), ("Product Analyst", r"\bproduct analyst\b"),
+    ("Systems Analyst", r"\bsystems analyst\b"),
+    ("Insurance Technology Consultant", r"\binsurance technology consultant\b"),
+    ("Data Engineer", r"\bdata engineer\b"), ("Analytics Engineer", r"\banalytics engineer\b"),
+    ("Data Platform Engineer", r"\bdata platform (?:engineer|roles?)\b"),
+    ("DevOps Engineer", r"\bdevops engineer\b"),
+    ("Java Lead Engineer", r"\b(?:sr\.?\s*)?java lead engineer\b"),
 )
 
-# A whole line phrased as "collaborate (closely/effectively) with <people/teams>" is a
-# soft/people requirement, not a skill — drop the entire line rather than trying to
-# split-and-filter it (splitting "collaborate closely with AI engineers, backend
-# engineers, and product teams" still leaves "collaborate closely with AI engineers" as
-# one fragment before a comma is even reached, which the role-noun suffix check alone
-# doesn't catch).
-_COLLABORATION_CLAUSE_RE = re.compile(
-    r"^(?:ability to\s+|experience\s+)?collaborat\w*\s+(?:closely\s+|effectively\s+|"
-    r"cross[- ]functionally\s+)?with\b",
-    re.IGNORECASE,
-)
 
-# JD phrasing like "or similar tools" / "or equivalent technologies" names no real
-# skill — it's a hedge word, and keeping it produces a fake, permanently-unmatchable
-# "skill" (confirmed on "Spark, dbt, Airflow, Dagster, Kafka, or similar tools" ->
-# 'similar tools' was coming through as its own item).
-_GENERIC_HEDGE_ITEM_RE = re.compile(
-    r"^(?:similar|equivalent|comparable|related|other|such)\b", re.IGNORECASE
-)
-
-# Generic trailing nouns that add nothing once a filler prefix has already been
-# stripped from the same item (e.g. "good Python skills" -> after prefix-stripping
-# "good " -> "Python skills"; this strips the trailing " skills" too -> "Python").
-_TRAILING_GENERIC_SUFFIX_RE = re.compile(r"\s+skills?\s*$", re.IGNORECASE)
-
-# A preposition surviving in the MIDDLE of a split fragment is the signal that the
-# comma it was split on wasn't actually enumerating a list — it was part of a nested
-# clause (adjectives, a shared trailing "for X, Y, Z" phrase, etc).
-_MID_PREPOSITION_RE = re.compile(r"\b(for|with|in|of|using|on)\b", re.IGNORECASE)
-
-
-def _strip_filler_prefix(text: str) -> str:
-    return _FILLER_PREFIX_RE.sub("", text.strip()).strip()
-
-
-def _looks_like_years_experience_clause(sentence: str) -> bool:
-    return bool(_YEARS_EXPERIENCE_RE.match(sentence.strip()))
-
-
-def _looks_like_role_or_team_name(item: str) -> bool:
-    return bool(_ROLE_NOUN_SUFFIX_RE.match(item.strip()))
-
-
-def _looks_like_collaboration_clause(sentence: str) -> bool:
-    return bool(_COLLABORATION_CLAUSE_RE.match(sentence.strip()))
-
-
-def _looks_like_generic_hedge(item: str) -> bool:
-    return bool(_GENERIC_HEDGE_ITEM_RE.match(item.strip()))
-
-
-def _clean_split_item(item: str) -> str:
-    """Per-item cleanup applied AFTER splitting — the whole-line filler strip only
-    catches filler at the very start of the original sentence, so a filler word
-    attached to a LATER item in an "X and good Y" style list (confirmed: "Strong SQL
-    and good Python skills." -> ['SQL', 'good Python skills'] without this) survives
-    otherwise."""
-    cleaned = _strip_filler_prefix(item)
-    cleaned = _TRAILING_GENERIC_SUFFIX_RE.sub("", cleaned)
-    return cleaned.strip(" .")
-
-
-def _split_enumeration(text: str) -> list | None:
-    """Splits on commas and a trailing and/or conjunction, but ONLY if (a) the text
-    actually contains an and/or conjunction at all — a comma list with NO conjunction
-    is almost always stacked adjectives on one noun, not an enumeration (confirmed:
-    "document-heavy, workflow-heavy business data" has no and/or and was wrongly split
-    into two fake "skills" before this check), and (b) every resulting fragment is
-    clean — no leftover mid-fragment preposition, the signature of a shared trailing
-    phrase a naive split would leave attached to only the last item. Returns None —
-    meaning "do not split" — if either check fails."""
-    if not re.search(r"\b(?:and|or)\b", text, re.IGNORECASE):
-        return None
-    normalized = re.sub(r"\s*,?\s+(?:and|or)\s+", ", ", text.strip().rstrip("."))
-    parts = [p.strip() for p in normalized.split(",") if p.strip()]
-    if len(parts) < 2:
-        return None
-    for p in parts:
-        if _MID_PREPOSITION_RE.search(p):
-            return None
-    return parts
-
-
-def atomize_skill_line(raw_line: str) -> list:
-    """Deterministic atomic-skill extraction for ONE JD requirement line. Returns a
-    list of atomic skill strings — length 0 (line filtered out entirely, e.g. a
-    years-of-experience restatement or a collaborate-with-people clause), 1 (line
-    couldn't be safely split; kept whole), or >1 (successfully split). Never raises."""
-    if not raw_line or not isinstance(raw_line, str):
-        return []
-    line = raw_line.strip()
-    if not line:
-        return []
-
-    if _looks_like_years_experience_clause(line):
-        return []
-    if _looks_like_education_clause(line): # NEW GUARD
-        return []
-    if _looks_like_collaboration_clause(line):
-        return []
-
-    stripped = _strip_filler_prefix(line).rstrip(".").strip()
-    if not stripped:
-        return []
-
-    items = _split_enumeration(stripped)
-    if items is None:
-        items = [stripped]
-
-    result = []
+def _dedupe(items: Iterable[str]) -> list[str]:
+    seen, output = set(), []
     for item in items:
-        cleaned = _clean_split_item(item)
-        if not cleaned:
-            continue
-        if _looks_like_role_or_team_name(cleaned):
-            continue
-        if _looks_like_generic_hedge(cleaned):
-            continue
-        result.append(cleaned)
-
-    return result
+        value = (item or "").strip()
+        key = value.casefold()
+        if value and key not in seen:
+            seen.add(key)
+            output.append(value)
+    return output
 
 
-def atomize_skill_list(raw_items: list) -> list:
-    """Runs atomize_skill_line over a whole JD skill array (mandatory_skills,
-    preferred_technical_skills, soft_preferred_skills, relevant_certifications) and
-    flattens + dedups (case-insensitive) the result, preserving first-seen casing and
-    order. NOT intended for responsibilities — those stay full sentences, since
-    scorer.py uses them for semantic-similarity text comparison, not per-skill exact
-    matching."""
-    seen = set()
-    out = []
-    for raw in raw_items or []:
-        for atom in atomize_skill_line(raw):
-            key = atom.strip().lower()
-            if key and key not in seen:
-                seen.add(key)
-                out.append(atom)
-    return out
+def find_catalog_items(text: str, catalog: tuple[tuple[str, str], ...]) -> list[str]:
+    """Return catalog labels in catalog order, independent of formatting noise."""
+    return _dedupe(label for label, pattern in catalog if re.search(pattern, text or "", re.I))
+
+
+def atomize_skill_line(raw_line: str) -> list[str]:
+    """Safely split a simple comma/and/or skills list without inventing fragments."""
+    line = (raw_line or "").strip().strip("•*- \t")
+    if not line or re.search(r"\b(?:years? of experience|bachelor|master|degree|certification)\b", line, re.I):
+        return []
+    line = _FILLER.sub("", line).rstrip(".")
+    if not re.search(r"[,;]|\b(?:and|or)\b", line, re.I):
+        return [line] if len(line.split()) <= 6 else []
+    parts = re.split(r"\s*(?:,|;|\band\b|\bor\b)\s*", line, flags=re.I)
+    return _dedupe(_FILLER.sub("", part).strip(" .") for part in parts if part.strip())
+
+
+def atomize_skill_list(raw_items: Iterable[str]) -> list[str]:
+    return _dedupe(atom for item in raw_items or [] for atom in atomize_skill_line(item))
+
+
+_SOFT_TERMS = re.compile(r"\b(?:communication|collaborat|leadership|stakeholder|teamwork|mentoring|presentation)\b", re.I)
+_TRAILING_CONTEXT = re.compile(r"\s+(?:skills?|experience|knowledge|expertise|proficiency|pipelines?|workflows?)$", re.I)
+
+
+def extract_requirement_items(lines: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Generic deterministic extraction from explicit Required/Preferred bullets."""
+    skills, roles = [], []
+    for raw in lines:
+        line = (raw or "").strip("•*- \t").rstrip(".")
+        if not line or re.search(r"\b(?:years? of experience|bachelor|master|degree|certification)\b", line, re.I):
+            continue
+        for part in re.split(r"\s*(?:;|,|\band\b|\bor\b)\s*", line, flags=re.I):
+            item = _TRAILING_CONTEXT.sub("", _FILLER.sub("", part).strip()).strip(" .")
+            if item and len(item.split()) <= 8:
+                (roles if _SOFT_TERMS.search(item) else skills).append(item)
+    return _dedupe(skills), _dedupe(roles)
