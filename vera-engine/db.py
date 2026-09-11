@@ -22,8 +22,10 @@ def init_db():
             CREATE TABLE IF NOT EXISTS jds (
                 role_id TEXT PRIMARY KEY,
                 document_id TEXT,
+                source_hash TEXT,
                 role_title TEXT,
                 department TEXT,
+                target_job_titles TEXT,
                 mandatory_skills TEXT,
                 mandatory_domain_requirements TEXT,
                 mandatory_role_specific_requirements TEXT,
@@ -94,6 +96,10 @@ def init_db():
             conn.execute("ALTER TABLE jds ADD COLUMN mandatory_role_specific_requirements TEXT")
         if "requirement_metadata" not in jd_cols:
             conn.execute("ALTER TABLE jds ADD COLUMN requirement_metadata TEXT")
+        if "source_hash" not in jd_cols:
+            conn.execute("ALTER TABLE jds ADD COLUMN source_hash TEXT")
+        if "target_job_titles" not in jd_cols:
+            conn.execute("ALTER TABLE jds ADD COLUMN target_job_titles TEXT")
 
         resume_cols = {row["name"] for row in conn.execute("PRAGMA table_info(resumes)").fetchall()}
         if "skills_all_sources" not in resume_cols:
@@ -120,17 +126,20 @@ def _dumps(value) -> str:
     return json.dumps(value if value is not None else [])
 
 
-def insert_jd(record: dict):
+def insert_jd(record: dict) -> str:
     with _connect() as conn:
+        existing = conn.execute("SELECT document_id, source_hash FROM jds WHERE role_id = ?", (record["role_id"],)).fetchone()
+        if existing and existing["source_hash"] == record.get("source_hash"):
+            record["document_id"] = existing["document_id"]
         conn.execute("""
             INSERT OR REPLACE INTO jds
-            (role_id, document_id, role_title, department, mandatory_skills, mandatory_domain_requirements, mandatory_role_specific_requirements, preferred_technical_skills,
+            (role_id, document_id, source_hash, role_title, department, target_job_titles, mandatory_skills, mandatory_domain_requirements, mandatory_role_specific_requirements, preferred_technical_skills,
              soft_preferred_skills, industry_keywords, requirement_metadata, min_years_experience, education_requirements,
              relevant_certifications, responsibilities, file_name, extraction_method, extraction_warnings, uploaded_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            record["role_id"], record["document_id"], record.get("role_title", ""),
-            record.get("department", ""), _dumps(record.get("mandatory_skills")),
+            record["role_id"], record["document_id"], record.get("source_hash", ""), record.get("role_title", ""),
+            record.get("department", ""), _dumps(record.get("target_job_titles")), _dumps(record.get("mandatory_skills")),
             _dumps(record.get("mandatory_domain_requirements")),
             _dumps(record.get("mandatory_role_specific_requirements")),
             _dumps(record.get("preferred_technical_skills")), _dumps(record.get("soft_preferred_skills")),
@@ -139,6 +148,7 @@ def insert_jd(record: dict):
             record.get("file_name", ""), record.get("extraction_method", ""),
             _dumps(record.get("extraction_warnings")), record.get("uploaded_at", ""),
         ))
+        return "refreshed" if existing else "created"
 
 
 def insert_resume(record: dict):
@@ -189,7 +199,7 @@ def get_jd_by_role_id(role_id: str) -> dict | None:
 
 def _row_to_jd_dict(row) -> dict:
     d = dict(row)
-    for field in ["mandatory_skills", "mandatory_domain_requirements", "mandatory_role_specific_requirements", "preferred_technical_skills", "soft_preferred_skills", "industry_keywords", "requirement_metadata",
+    for field in ["target_job_titles", "mandatory_skills", "mandatory_domain_requirements", "mandatory_role_specific_requirements", "preferred_technical_skills", "soft_preferred_skills", "industry_keywords", "requirement_metadata",
                   "education_requirements", "relevant_certifications", "responsibilities", "extraction_warnings"]:
         d[field] = json.loads(d[field]) if d[field] else []
     return d
