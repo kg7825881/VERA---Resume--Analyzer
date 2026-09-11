@@ -81,7 +81,7 @@ def upload_jd(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(500, f"Failed to process JD: {str(e)}")
 
-    db.insert_jd(record)
+    storage_status = db.insert_jd(record)
     # extraction_warnings is intentionally NOT included here — those are extraction-quality
     # signals for whoever runs the pipeline (already logged server-side by jd_extractor.py),
     # not candidate/role-facing data. The full record (including extraction_warnings) is
@@ -91,6 +91,7 @@ def upload_jd(file: UploadFile = File(...)):
         "role_id": record["role_id"],
         "role_title": record.get("role_title", ""),
         "document_id": record["document_id"],
+        "storage_status": storage_status,
         "extraction_method": record["extraction_method"],
     }
 
