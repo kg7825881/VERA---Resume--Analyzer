@@ -158,6 +158,7 @@ function CandidateDetail({ params }) {
   const ringGradient = `conic-gradient(var(--a) 0 ${record.final_score}%, #173047 ${record.final_score}%)`;
   const hasExperienceRequirement = Boolean(sections.experience.years);
   const hasEducationRequirement = record.evidence?.education?.[0]?.status !== "not_required";
+  const candidateRole = sections.jobTitle?.best_match?.title || "";
 
   return (
     <section className="view active">
@@ -166,7 +167,7 @@ function CandidateDetail({ params }) {
           <div className="ey">Candidate analysis</div>
           <h1>{record.candidate_name || "Unnamed candidate"}</h1>
           <p>
-            {roleTitle} · Ranked #{record.rank} for current JD
+            {candidateRole ? `${candidateRole}  ` : ""}
           </p>
         </div>
         <button className="btn primary" onClick={() => router.push(`/results/${roleId}`)}>
@@ -254,7 +255,7 @@ function CandidateDetail({ params }) {
                       ? "weak_match"
                       : "missing"
                   }
-                  label={`${sections.jobTitle.best_match.title} (${sections.jobTitle.best_match.company})`}
+                  label={sections.jobTitle.best_match.title}
                   detail={sections.jobTitle.judge_reason || `Match Level: ${sections.jobTitle.match_level}`}
                 />
               </EvidenceSection>
