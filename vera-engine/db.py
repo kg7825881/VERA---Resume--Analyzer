@@ -254,7 +254,7 @@ def get_scores_by_role(role_id: str) -> list[dict]:
                    r.experience, r.education, r.certifications, r.projects
             FROM scores s JOIN resumes r ON s.candidate_id = r.candidate_id
             WHERE s.role_id = ? AND s.run_id = ?
-            ORDER BY s.final_score DESC
+            ORDER BY s.hard_gate_failed ASC, s.final_score DESC
         """, (role_id, run_id)).fetchall()
         results = []
         for row in rows:
