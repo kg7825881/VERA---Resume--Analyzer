@@ -28,7 +28,7 @@ import db
 from common import new_id
 from extractor import ingest_resume
 from jd_extractor import ingest_jd
-from scorer import calculate_job_fit
+from scorer import calculate_job_fit, validate_jd_for_scoring
 from role_resolver import resolve_role
 
 # Ollama serves requests over HTTP, so ingestion/scoring calls are I/O-bound — a thread pool
@@ -219,6 +219,9 @@ def analyze(req: AnalyzeRequest):
         raise HTTPException(422, "Provide role_id or role_query.")
 
     jd_data = db.get_jd_by_role_id(role["role_id"])
+    validation_errors = validate_jd_for_scoring(jd_data)
+    if validation_errors:
+        raise HTTPException(422, " ".join(validation_errors))
     resumes = db.get_resumes(req.candidate_ids)
 
     if not resumes:
