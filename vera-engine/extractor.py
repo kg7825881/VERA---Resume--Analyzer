@@ -1256,27 +1256,6 @@ def _headline_title(lines: list[str]) -> str:
     return ""
 
 
-def _summary_role_title(summary_lines: list[str], headline_title: str) -> str:
-    """Read a stated role from summary prose without inventing one.
-
-    The common form is ``Data Engineer with 4.9+ years...``. This accepts the
-    candidate's own phrase before ``with/having <n> years``, rather than
-    relying on a fixed catalogue of job titles.
-    """
-    for line in summary_lines:
-        match = re.search(
-            r"^\s*([A-Za-z][A-Za-z0-9 .&/()'’-]{1,80}?)\s+"
-            r"(?:with|having)\s+\d+(?:\.\d+)?\s*\+?\s+years?\b",
-            line,
-            re.I,
-        )
-        if match:
-            candidate = match.group(1).strip(" -–—,:;")
-            if _ROLE_WORD_RE.search(candidate) and len(candidate.split()) <= 10:
-                return candidate
-    return headline_title
-
-
 def _experience_date_key(raw_date: str) -> tuple[int, int]:
     """Sortable end-date key used only to find the latest extracted job."""
     value = (raw_date or "").strip().casefold()
@@ -1298,25 +1277,19 @@ def _latest_experience_role(experience: list[dict]) -> tuple[str, dict | None]:
     return (latest.get("title") or "").strip(), latest
 
 
-def _role_core_tokens(title: str) -> set[str]:
-    return {
-        token for token in re.findall(r"[a-z]+", (title or "").casefold())
-        if token not in _ROLE_SENIORITY_WORDS and token not in {"and", "of", "the", "with"}
-    }
+def _resolve_current_role(latest_title: str, headline_title: str) -> tuple[str, str]:
+    """Use employment history for the role used in screening.
 
-
-def _resolve_current_role(summary_title: str, latest_title: str, latest_entry: dict | None) -> tuple[str, str]:
-    """Resolve the final current role and record the evidence-based decision."""
-    if not summary_title:
-        return latest_title, "latest_experience_only" if latest_title else "no_role_found"
-    if not latest_title:
-        return summary_title, "summary_only"
-
-    if _role_core_tokens(summary_title) & _role_core_tokens(latest_title):
-        return latest_title, "summary_and_latest_experience_agree"
-    if _experience_date_key((latest_entry or {}).get("end_date_raw") or "")[0] == 9999:
-        return latest_title, "current_experience_overrides_conflicting_summary"
-    return summary_title, "summary_preferred_over_ambiguous_latest_experience"
+    A profile/summary often describes an aspiration, a broader professional
+    identity, or several roles.  It must not override the candidate's most
+    recent dated employment title.  A clearly presented headline title is a
+    fallback only when no work-history title was extracted.
+    """
+    if latest_title:
+        return latest_title, "latest_experience"
+    if headline_title:
+        return headline_title, "resume_headline_fallback"
+    return "", "no_current_or_latest_role_found"
 
 
 def _extract_certifications(lines: list[str]) -> list[str]:
@@ -1374,17 +1347,14 @@ def extract_structured_evidence(resume_text: str) -> dict:
         candidate_name = next((line for line in all_lines[:25] if 1 < len(line.split()) <= 5 and "@" not in line and not re.search(r"\d", line) and not _section_for_heading(line)), "")
     summary_text = " ".join(summary_lines)
     years_match = re.search(r"\b(\d{1,2}(?:\.\d+)?)\s*\+?\s*years?\b", summary_text, re.I)
-    title_match = re.search(r"\b(?:senior |lead |principal )?(?:data scientist|data engineer|software engineer|business analyst|product manager|product owner|devops engineer)\b", " ".join(all_lines[:40]), re.I)
-    summary_role_title = _summary_role_title(summary_lines, headline_title or (title_match.group(0) if title_match else ""))
-    latest_experience_role_title, latest_experience_entry = _latest_experience_role(experience)
+    latest_experience_role_title, _ = _latest_experience_role(experience)
     resolved_role_title, role_resolution = _resolve_current_role(
-        summary_role_title, latest_experience_role_title, latest_experience_entry
+        latest_experience_role_title, headline_title
     )
     return {"candidate_name": candidate_name,
             # Kept under this established persistence key for backward compatibility.
-            # It now contains the resolved current role, not merely the summary wording.
+            # It contains the current/latest employment role, never a summary claim.
             "current_role_title_from_summary": resolved_role_title,
-            "summary_role_title": summary_role_title,
             "latest_experience_role_title": latest_experience_role_title,
             "current_role_title_resolution": role_resolution,
             "stated_years_experience_from_summary": float(years_match.group(1)) if years_match else 0,
