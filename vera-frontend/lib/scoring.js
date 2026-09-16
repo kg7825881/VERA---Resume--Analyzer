@@ -55,10 +55,16 @@ export function passesMandatory(record) {
   return !record.hard_gate_failed;
 }
 
-/** Sort every scored record (ranked + excluded) by final_score desc, and attach a 1-based rank. */
+/**
+ * Keep candidates who clear mandatory requirements ahead of excluded candidates.
+ * Scores order records within each group, but a hard-gate failure can never
+ * receive a better rank than an eligible candidate.
+ */
 export function rankAll(ranked, excluded) {
-  const all = [...(ranked || []), ...(excluded || [])].sort((a, b) => b.final_score - a.final_score);
-  return all.map((r, i) => ({ ...r, rank: i + 1 }));
+  const byScore = (a, b) => b.final_score - a.final_score;
+  const eligible = [...(ranked || [])].sort(byScore);
+  const ineligible = [...(excluded || [])].sort(byScore);
+  return [...eligible, ...ineligible].map((r, i) => ({ ...r, rank: i + 1 }));
 }
 
 /** Top few matched skills across categories, for a compact "top evidence" table cell. */
