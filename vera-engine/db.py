@@ -56,6 +56,7 @@ def init_db():
                 education TEXT,
                 certifications TEXT,
                 projects TEXT,
+                skill_evidence TEXT,
                 file_name TEXT,
                 extraction_method TEXT,
                 extraction_warnings TEXT,
@@ -106,6 +107,8 @@ def init_db():
             conn.execute("ALTER TABLE resumes ADD COLUMN skills_all_sources TEXT")
         if "current_role_title_from_summary" not in resume_cols:
             conn.execute("ALTER TABLE resumes ADD COLUMN current_role_title_from_summary TEXT")
+        if "skill_evidence" not in resume_cols:
+            conn.execute("ALTER TABLE resumes ADD COLUMN skill_evidence TEXT")
 
 
 @contextmanager
@@ -156,18 +159,30 @@ def insert_resume(record: dict):
         conn.execute("""
             INSERT OR REPLACE INTO resumes
             (candidate_id, document_id, candidate_name, skills, skills_all_sources, current_role_title_from_summary,
-             total_years_experience, experience, education, certifications, projects, file_name, extraction_method,
+             total_years_experience, experience, education, certifications, projects, skill_evidence, file_name, extraction_method,
              extraction_warnings, uploaded_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             record["candidate_id"], record["document_id"], record.get("candidate_name", ""),
             _dumps(record.get("skills")), _dumps(record.get("skills_all_sources")),
             record.get("current_role_title_from_summary", ""), record.get("total_years_experience", 0),
             _dumps(record.get("experience")), _dumps(record.get("education")),
-            _dumps(record.get("certifications")), _dumps(record.get("projects")),
+            _dumps(record.get("certifications")), _dumps(record.get("projects")), _dumps(record.get("skill_evidence")),
             record.get("file_name", ""), record.get("extraction_method", ""),
             _dumps(record.get("extraction_warnings")), record.get("uploaded_at", ""),
         ))
+
+
+def clear_screening_data() -> dict:
+    """Clear the previous candidate batch and its scores, preserving the JD library."""
+    with _connect() as conn:
+        score_count = conn.execute("SELECT COUNT(*) FROM scores").fetchone()[0]
+        resume_count = conn.execute("SELECT COUNT(*) FROM resumes").fetchone()[0]
+        # Scores reference candidates, so remove them first.  JDs remain available
+        # for the next screening through the existing role library.
+        conn.execute("DELETE FROM scores")
+        conn.execute("DELETE FROM resumes")
+    return {"removed_resumes": resume_count, "removed_scores": score_count}
 
 
 def insert_score(candidate_id: str, role_id: str, run_id: str, result: dict):
@@ -217,7 +232,7 @@ def get_resumes(candidate_ids: list[str] = None) -> list[dict]:
 
 def _row_to_resume_dict(row) -> dict:
     d = dict(row)
-    for field in ["skills", "skills_all_sources", "experience", "education", "certifications", "projects", "extraction_warnings"]:
+    for field in ["skills", "skills_all_sources", "experience", "education", "certifications", "projects", "skill_evidence", "extraction_warnings"]:
         d[field] = json.loads(d[field]) if d[field] else []
     return d
 
