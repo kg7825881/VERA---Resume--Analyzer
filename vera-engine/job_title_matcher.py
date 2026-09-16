@@ -35,6 +35,47 @@ from matcher import MATCH_LEVEL_CONTRIBUTION
 
 STOPWORDS = {"the", "a", "an", "of", "and", "for"}
 
+# Approved title families supplied by the hiring workflow.  These are exact
+# acceptable alternatives for a JD's primary title, not broad synonym guesses:
+# a candidate earns full title credit only when their resolved latest title is
+# one of these stated titles (or the JD title itself).  New role families can
+# be added as data without changing matching logic.
+ROLE_TITLE_REFERENCE = {
+    "Data Engineer — AI Data Platform": (
+        "AI Data Engineer",
+        "Data Platform Engineer",
+        "Machine Learning Data Engineer",
+        "Senior Data Engineer",
+        "Big Data Engineer",
+    ),
+    "Senior Business Analyst": (
+        "Lead Business Analyst",
+        "Senior IT Business Analyst",
+        "Business Systems Analyst",
+        "Senior Product Analyst",
+        "Functional Business Analyst",
+    ),
+    "DevOps Engineer": (
+        "Site Reliability Engineer",
+        "Cloud DevOps Engineer",
+        "Platform Engineer",
+        "Infrastructure Engineer",
+        "CI/CD Engineer",
+    ),
+    "Sr Java Lead Engineer": (
+        "Java Technical Lead",
+        "Senior Java Developer",
+        "Lead Software Engineer — Java",
+        "Java Solutions Architect",
+        "Backend Engineering Lead",
+    ),
+}
+
+
+def _title_key(title: str) -> str:
+    """Comparison key that ignores presentation-only punctuation and case."""
+    return re.sub(r"[^a-z0-9]+", "", (title or "").casefold())
+
 
 def _bounded_related_title(title: str, target_role_title: str) -> str | None:
     """Recognise a small set of defensible, adjacent title families.
@@ -201,7 +242,26 @@ def _collect_candidate_titles(candidate_data: dict) -> list[dict]:
     return titles
 
 
-def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judge_evidence) -> dict:
+def _target_titles(target_role_titles: str | list[str]) -> list[str]:
+    """Normalise one JD title or a JD-provided list of acceptable titles."""
+    raw_titles = [target_role_titles] if isinstance(target_role_titles, str) else (target_role_titles or [])
+    titles, seen = [], set()
+    # First retain the JD's own title variants, then expand a matching primary
+    # title with its explicitly approved alternatives from ROLE_TITLE_REFERENCE.
+    expanded_titles = list(raw_titles)
+    reference_by_key = {_title_key(primary): alternatives for primary, alternatives in ROLE_TITLE_REFERENCE.items()}
+    for value in raw_titles:
+        expanded_titles.extend(reference_by_key.get(_title_key(value), ()))
+    for value in expanded_titles:
+        title = (value or "").strip()
+        key = _title_key(title)
+        if title and key not in seen:
+            seen.add(key)
+            titles.append(title)
+    return titles
+
+
+def score_job_titles(candidate_data: dict, target_role_titles: str | list[str], judge_fn=judge_evidence) -> dict:
     """
     Scores how closely a candidate's job titles (past roles + summary-stated
     current title) relate to the JD's role_title.
@@ -210,35 +270,42 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
     yields an 85% match. Falls back to a single judge call if not met.
     """
     titles = _collect_candidate_titles(candidate_data)
-    target_role_title = (target_role_title or "").strip()
+    accepted_titles = _target_titles(target_role_titles)
 
-    if not titles or not target_role_title:
+    if not titles or not accepted_titles:
         return {
             "contribution": 0.0,
             "best_match": None,
             "status": "missing",
             "all_titles": [],
             "match_level": "none",
-            "judge_reason": "" if target_role_title else "No JD role title to compare against.",
+            "judge_reason": "" if accepted_titles else "No JD target job titles to compare against.",
+            "target_role_titles": accepted_titles,
         }
 
-    target_tokens = _tokenize(target_role_title)
+    target_token_sets = [(title, _tokenize(title)) for title in accepted_titles]
     all_titles = [
-        {"title": t["title"], "company": t["company"], "jaccard": round(_jaccard(target_tokens, _tokenize(t["title"])), 3)}
+        {"title": t["title"], "company": t["company"], "jaccard": round(max(
+            _jaccard(tokens, _tokenize(t["title"])) for _, tokens in target_token_sets
+        ), 3)}
         for t in titles
     ]
     # Always score the current/latest title.  Older titles remain available for
     # context but must not be presented as the candidate's current match.
     latest_title_dict = titles[0]
     latest_tokens = _tokenize(latest_title_dict["title"])
+    best_target_title, target_tokens = max(
+        target_token_sets, key=lambda pair: _jaccard(pair[1], latest_tokens)
+    )
     overlap = _jaccard(target_tokens, latest_tokens)
 
-    if target_tokens == latest_tokens:
+    exact_target_title = next((title for title, tokens in target_token_sets if tokens == latest_tokens), None)
+    if exact_target_title:
         # Bypass the judge and return deterministic score
         contribution = 1.0
         match_level = "direct"
         status = "matched"
-        judge_reason = f"Exact current-title match: '{latest_title_dict['title']}'."
+        judge_reason = f"Exact current-title match to accepted JD title: '{exact_target_title}'."
         
         best_match = dict(latest_title_dict)
         best_match["jaccard"] = round(_jaccard(target_tokens, _tokenize(latest_title_dict["title"])), 3)
@@ -252,6 +319,8 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
             "all_titles": all_titles,
             "match_level": match_level,
             "judge_reason": judge_reason,
+            "matched_target_title": exact_target_title,
+            "target_role_titles": accepted_titles,
         }
 
     evidence_chunks = [{
@@ -259,7 +328,8 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
         "source_type": "job_title",
         "source_label": f"{latest_title_dict['title']} at {latest_title_dict['company']}",
     }]
-    judgment = judge_fn(target_role_title, evidence_chunks)
+    requirement = "Accepted JD job titles (match any one): " + "; ".join(accepted_titles)
+    judgment = judge_fn(requirement, evidence_chunks)
     match_level = judgment.get("match", "none")
     judge_reason = judgment.get("reason", "")
     contribution = MATCH_LEVEL_CONTRIBUTION.get(match_level, 0.0)
@@ -268,7 +338,11 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
     groundedness_warning = None
     if contribution > 0.0:
         evidence_titles_text = " | ".join(t["title"] for t in titles)
-        groundedness_warning = _reason_falsely_cites_jd_title(judge_reason, evidence_titles_text, target_role_title)
+        groundedness_warning = next((
+            _reason_falsely_cites_jd_title(judge_reason, evidence_titles_text, target)
+            for target in accepted_titles
+            if _reason_falsely_cites_jd_title(judge_reason, evidence_titles_text, target)
+        ), None)
         
         if groundedness_warning:
             match_level = "none"
@@ -277,7 +351,10 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
     # Keep the judge grounded, but do not turn sensible, bounded adjacent
     # titles into an automatic zero merely because they do not share the
     # exact JD wording.
-    related_title_reason = _bounded_related_title(latest_title_dict["title"], target_role_title)
+    related_title_reason = next((
+        _bounded_related_title(latest_title_dict["title"], target) for target in accepted_titles
+        if _bounded_related_title(latest_title_dict["title"], target)
+    ), None)
     if contribution == 0.0 and related_title_reason:
         match_level = "related"
         contribution = 0.8
@@ -311,6 +388,8 @@ def score_job_titles(candidate_data: dict, target_role_title: str, judge_fn=judg
         "all_titles": all_titles,
         "match_level": match_level,
         "judge_reason": judge_reason,
+        "matched_target_title": best_target_title,
+        "target_role_titles": accepted_titles,
     }
     if groundedness_warning:
         result["groundedness_warning"] = groundedness_warning
