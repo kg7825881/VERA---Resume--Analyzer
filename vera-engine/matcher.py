@@ -63,10 +63,30 @@ MATCH_LEVEL_CONTRIBUTION = {
     "none": 0.0,
 }
 
-# Interchangeable skill acronyms/terms that should satisfy exact matching bidirectionally
+# Interchangeable skill names that satisfy exact matching bidirectionally.
+#
+# These are deliberately complete, named technologies/capabilities rather than
+# arbitrary individual words.  For example, "Spark" can satisfy "PySpark",
+# but "Data" must never satisfy "Data Lakehouse".  The resume extractor keeps
+# the candidate's original wording; this table is used only at match time.
+_EQUIVALENT_SKILL_GROUPS = (
+    ("etl", "elt"),
+    ("lakehouse", "data lakehouse"),
+    ("spark", "apache spark", "pyspark"),
+    ("airflow", "apache airflow", "airflow dags", "apache airflow dags"),
+    ("rag", "retrieval augmented generation"),
+    ("ocr", "optical character recognition"),
+    ("genai", "generative ai"),
+    ("llm", "llms", "large language model", "large language models"),
+    ("postgres", "postgresql"),
+    ("aws", "amazon web services"),
+    ("gcp", "google cloud platform"),
+    ("azure", "microsoft azure"),
+)
 EQUIVALENT_SKILLS = {
-    "etl": {"etl", "elt"},
-    "elt": {"etl", "elt"},
+    item: set(group)
+    for group in _EQUIVALENT_SKILL_GROUPS
+    for item in group
 }
 
 
