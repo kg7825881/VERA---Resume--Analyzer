@@ -55,6 +55,16 @@ SKILL_PATTERNS: tuple[tuple[str, str], ...] = (
     ("OpenTelemetry", r"\bopen telemetry\b"), ("GitHub Copilot", r"\bgithub copilot\b"),
     ("ChatGPT", r"\bchatgpt\b"),
     ("Claude", r"\bclaude\b"), ("Cursor", r"\bcursor\b"),
+    # Shared baseline dictionary: these labels can appear in either a JD or a
+    # candidate's Skills, Experience, or Projects section.
+    ("FastAPI", r"\bfastapi\b"), ("Django", r"\bdjango\b"),
+    ("Git", r"\bgit\b"), ("GitHub", r"\bgithub\b"),
+    ("Databricks", r"\b(?:azure )?databricks\b"),
+    ("Azure OpenAI", r"\bazure openai\b"), ("Azure AI Search", r"\bazure ai search\b"),
+    ("PostgreSQL", r"\b(?:postgres|postgresql)\b"),
+    ("MongoDB", r"\bmongodb\b"), ("Snowflake", r"\bsnowflake\b"),
+    ("TensorFlow", r"\btensorflow\b"), ("PyTorch", r"\bpytorch\b"),
+    ("Pandas", r"\bpandas\b"), ("NumPy", r"\bnumpy\b"),
     ("Agile", r"\bagile\b"), ("SaaS", r"\bsaas\b"),
     ("Guidewire ClaimCenter", r"\bguidewire claimcenter\b"),
     ("Duck Creek", r"\bduck creek\b"), ("Origami Risk", r"\borigami risk\b"),
