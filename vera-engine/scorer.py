@@ -55,6 +55,44 @@ WEIGHTS = {
 HARD_GATE_MIN_MANDATORY_COVERAGE = 0.60
 
 
+def validate_jd_for_scoring(jd_data: dict) -> list[str]:
+    """Return actionable reasons when a JD has too little parsed content to score.
+
+    A title on its own is not enough: treating every absent category as a full
+    score makes an unrelated candidate look highly qualified.  The JD must
+    contain at least one substantive requirement beyond its job title.
+    """
+    requirement_groups = (
+        jd_data.get("mandatory_skills", []),
+        jd_data.get("mandatory_domain_requirements", []),
+        jd_data.get("mandatory_role_specific_requirements", []),
+        jd_data.get("preferred_technical_skills", []),
+        jd_data.get("industry_keywords", []),
+        jd_data.get("soft_preferred_skills", []),
+        jd_data.get("education_requirements", []),
+    )
+    has_requirement = any(group for group in requirement_groups) or jd_data.get("min_years_experience") is not None
+    if has_requirement:
+        return []
+    return [
+        "The JD has a job title but no extracted skills, experience, education, or other requirements. "
+        "Review or re-upload the JD before scoring candidates."
+    ]
+
+
+def _job_title_targets(jd_data: dict) -> list[str]:
+    """Return all acceptable title variants stated by the JD, in source order."""
+    candidates = [jd_data.get("role_title", ""), *(jd_data.get("target_job_titles", []) or [])]
+    titles, seen = [], set()
+    for value in candidates:
+        title = (value or "").strip()
+        key = title.casefold()
+        if title and key not in seen:
+            seen.add(key)
+            titles.append(title)
+    return titles
+
+
 def _score_experience(candidate_data: dict, jd_data: dict) -> tuple[float, str, dict]:
     """
     Only evaluates if min_years_experience is in the JD.
@@ -91,21 +129,21 @@ def _score_job_title(candidate_data: dict, jd_data: dict, judge_fn=judge_evidenc
     genuinely qualified candidate can carry an unconventional past title (e.g. "Data
     Wrangler" instead of "Data Engineer").
     """
-    role_title = jd_data.get("role_title", "")
-    if not role_title.strip():
+    role_titles = _job_title_targets(jd_data)
+    if not role_titles:
         return WEIGHTS["job_title_match"] * 100, "No role title on JD to compare against", {}
 
-    result = score_job_titles(candidate_data, role_title, judge_fn)
+    result = score_job_titles(candidate_data, role_titles, judge_fn)
     score = result["contribution"] * WEIGHTS["job_title_match"] * 100
 
     if result["best_match"]:
         notes = (
             f"Best match: \"{result['best_match']['title']}\" at {result['best_match']['company']} "
-            f"— judged {result['match_level']} against required \"{role_title}\""
+            f"— judged {result['match_level']} against accepted JD title \"{result.get('matched_target_title', role_titles[0])}\""
             + (f" ({result['judge_reason']})" if result.get("judge_reason") else "")
         )
     else:
-        notes = f"No past job title to compare against required \"{role_title}\""
+        notes = f"No current job title to compare against accepted JD titles"
 
     return round(score, 2), notes, result
 
@@ -284,6 +322,10 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
     call covering all of the candidate's titles together, not the BM25 retrieval
     pipeline — titles are short enough that retrieval doesn't add anything.
     """
+    validation_errors = validate_jd_for_scoring(jd_data)
+    if validation_errors:
+        raise ValueError(" ".join(validation_errors))
+
     candidate_skills = candidate_data.get("skills_all_sources") or candidate_data.get("skills", [])
     evidence_index = CandidateEvidenceIndex(candidate_data)
 
@@ -291,9 +333,10 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
     jd_mandatory_technical = jd_data.get("mandatory_skills", [])
     jd_mandatory_domain = jd_data.get("mandatory_domain_requirements", [])
     jd_mandatory_role_specific = jd_data.get("mandatory_role_specific_requirements", [])
-    # Both lists are hard requirements.  They are scored together for a single,
-    # consistent gate, while their evidence remains separate for reviewers.
-    jd_mandatory_skills = jd_mandatory_technical + jd_mandatory_domain + jd_mandatory_role_specific
+    # Role-specific entries can contain role names or business expectations.
+    # They are intentionally not technical-skill gate items: acceptable job
+    # titles are evaluated by the title matcher against JD target titles.
+    jd_mandatory_skills = jd_mandatory_technical + jd_mandatory_domain
     mandatory_result = score_skill_list(
         jd_mandatory_skills, candidate_skills, evidence_index, judge_fn, exact_only=False
     )
@@ -385,7 +428,12 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
             row for row in _build_evidence(mandatory_result) if row["skill"] in jd_mandatory_domain
         ],
         "mandatory_role_specific_requirements": [
-            row for row in _build_evidence(mandatory_result) if row["skill"] in jd_mandatory_role_specific
+            {
+                "requirement": item,
+                "status": "evaluated_as_job_title" if item in _job_title_targets(jd_data) else "not_technical_gate",
+                "job_title_evidence": job_title_evidence if item in _job_title_targets(jd_data) else [],
+            }
+            for item in jd_mandatory_role_specific
         ],
         "preferred_skills": _build_evidence(pref_result),
         "soft_skills": _build_evidence(soft_result),
