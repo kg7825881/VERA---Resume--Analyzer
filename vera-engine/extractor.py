@@ -812,6 +812,7 @@ def _coalesce_skill_lines(lines: list[str]) -> list[str]:
             and not _TECHNOLOGY_LABEL_RE.match(line)
             and not line.rstrip().endswith(":")
             and ":" not in line
+            and not _looks_like_skill_summary_prose(line)
             and (
                 (category_value and "," not in category_value)
                 or ("," in previous and len(after_last_comma.split()) == 1)
@@ -835,18 +836,82 @@ def _split_skill_items(value: str) -> list[str]:
     # line. One opening parenthesis is enough to preserve the grouped tool list.
     value = re.sub(r"\(\s*\(", "(", value)
     items, buffer, depth = [], [], 0
-    for character in value:
+    for index, character in enumerate(value):
         if character in "([{" :
             depth += 1
         elif character in ")] }".replace(" ", ""):
             depth = max(0, depth - 1)
-        if character in ",;•|+" and depth == 0:
+        # A plus is a list delimiter only when it is visually used as one.
+        # Do not split "5+ years" into a fake skill such as "AI Lead with 5".
+        is_plus_delimiter = (
+            character == "+"
+            and index > 0
+            and index + 1 < len(value)
+            and value[index - 1].isspace()
+            and value[index + 1].isspace()
+        )
+        if (character in ",;•|" or is_plus_delimiter) and depth == 0:
             items.append("".join(buffer))
             buffer = []
         else:
             buffer.append(character)
     items.append("".join(buffer))
     return [item.strip() for item in items]
+
+
+def _looks_like_skill_summary_prose(text: str) -> bool:
+    """Reject narrative text that happens to sit below a Skills heading."""
+    normalized = re.sub(r"\s+", " ", text).strip()
+    # A long comma-separated list is still a list; a long sentence is prose.
+    if len(normalized) > 180 and normalized.count(",") < 2:
+        return True
+    return bool(re.search(
+        r"\b(?:years?\s+of\s+experience|speciali[sz]ed|proven\s+ability|"
+        r"responsible\s+for|developed|delivered|worked|designed|built|"
+        r"implemented|ensured|managed|leading)\b",
+        normalized,
+        re.I,
+    ))
+
+
+def _explicit_technology_list_items(text: str) -> list[str]:
+    """Read a comma-separated tool list introduced in normal resume prose.
+
+    This is deliberately evidence-led: it accepts only lists explicitly
+    introduced by phrases such as "using" or "leveraging", never every noun
+    from a responsibility sentence.
+    """
+    matches = re.finditer(
+        r"\b(?:using|leveraging|utilized|utilising|via)\s+([^.!?;]{1,260})",
+        text,
+        re.I,
+    )
+    items = []
+    for match in matches:
+        value = match.group(1).strip()
+        # Stop before the explanatory part of a sentence.  For example,
+        # "using LangGraph to ensure coherent trip generation" yields
+        # LangGraph, not the prose after it.
+        value = re.split(
+            r"\b(?:to|for|while|ensuring|allowing|enabling|handling|covering|"
+            r"reducing|improving)\b",
+            value,
+            maxsplit=1,
+            flags=re.I,
+        )[0].strip(" ,")
+        # A single named technology ("utilized Qdrant vector database") is
+        # also evidence.  Reject only longer prose clauses without list syntax.
+        if ("," not in value and not re.search(r"\s+and\s+", value, re.I)
+                and len(value.split()) > 5):
+            continue
+        for item in _split_skill_items(re.sub(r"\s+and\s+", ", ", value, flags=re.I)):
+            item = re.sub(r"^(?:and|with)\s+", "", item.strip(), flags=re.I)
+            # These are explanatory continuations after a valid list, not tools.
+            if re.match(r"^(?:to|for|while|reducing|ensuring|allowing|enabling|handling|covering)\b", item, re.I):
+                continue
+            if 1 <= len(item.split()) <= 8 and len(item) <= 80:
+                items.append(item)
+    return items
 
 
 def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], list[dict]]:
@@ -863,9 +928,19 @@ def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], li
         if not text:
             continue
         technology_line = _TECHNOLOGY_LABEL_RE.match(text)
-        if section == "Skills" or technology_line:
-            left, separator, right = text.partition(":")
-            is_labeled = bool(separator)
+        left, separator, right = text.partition(":")
+        is_labeled = bool(separator)
+        # On page-two resumes, a "Certifications" region can contain grouped
+        # capabilities such as "Data Engineering & Pipelines: Pandas, SQL".
+        # Treat those labelled lists as skills, not as certificate names.
+        grouped_capability_line = section == "Certifications" and is_labeled
+        narrative_skills_line = (
+            section == "Skills"
+            and not technology_line
+            and not is_labeled
+            and _looks_like_skill_summary_prose(text)
+        )
+        if (section == "Skills" and not narrative_skills_line) or technology_line or grouped_capability_line:
             if technology_line:
                 values = [technology_line.group("items")]
             else:
@@ -878,15 +953,24 @@ def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], li
                             item = item.lstrip("(").strip()
                         if item.endswith(")") and item.count(")") > item.count("("):
                             item = item.rstrip(")").strip()
-                        if not item or len(item) > 80 or len(item.split()) > 8:
+                        if (not item or len(item) > 80 or len(item.split()) > 8
+                                or _looks_like_skill_summary_prose(item)):
                             continue
-                        if re.fullmatch(r"(?:skills?|tools?|technologies|frameworks?|languages|tech|misc|platforms?|core frameworks?)", item, re.I):
+                        if re.fullmatch(r"(?:skills?|tools?|technologies|frameworks?|languages|tech|misc|platforms?|core frameworks?|on)", item, re.I):
                             continue
                         labels_with_source.append((item, text))
+                        # Preserve the complete candidate phrase, and also make
+                        # a terminal named tool matchable ("indexing using
+                        # FAISS" -> "FAISS") without relying on a dictionary.
+                        terminal_tool = re.search(r"\busing\s+([A-Za-z][A-Za-z0-9+#._-]{1,})$", item, re.I)
+                        if terminal_tool:
+                            labels_with_source.append((terminal_tool.group(1), text))
         # Outside a formal Skills section we only use aliases when they appear
         # in ordinary prose. This catches “used PySpark” without treating every
         # noun in a responsibility sentence as a skill.
         if section in {"Experience", "Projects"}:
+            for item in _explicit_technology_list_items(text):
+                labels_with_source.append((item, text))
             for canonical, pattern in _RESUME_ALIASES:
                 if re.search(pattern, text, re.I):
                     labels_with_source.append((canonical, text))
@@ -932,6 +1016,13 @@ def _deterministic_experience(lines: list[str], fallback_title: str = "") -> lis
             company, title = parts[0].strip(), parts[1].strip()
         else:
             title, company = title_company.strip() or fallback_title, ""
+        # Some templates put the dates first, then the employer on the next
+        # line, and the role only in the resume headline.  Keep the headline as
+        # the role but still store the employer for that entry.
+        if not company:
+            company = next((value.strip(" -–—,()") for value in lines[index + 1:min(next_role_index, index + 4)]
+                            if re.search(r"\b(?:inc(?:orporated)?|ltd|llc|corp(?:oration)?|"
+                                         r"technologies|solutions|systems|company|pvt)\b", value, re.I)), "")
         title = _DATE_RANGE_RE.sub("", title).strip(" -–—,)")
         # Keep physical lines separate: an explicit "Tools and Techniques Used"
         # label may appear after the role date, and matching it requires the line
@@ -960,7 +1051,15 @@ def _deterministic_projects(lines: list[str]) -> list[dict]:
         title = re.sub(r"^[-•#\s]+", "", line).strip()
         if not title or title.lower().startswith(("tools", "technologies", "description")):
             continue
-        project_lines = lines[index:min(len(lines), index + 5)]
+        # A project can span a whole page.  Retain its evidence through the
+        # next recognisable project heading instead of inspecting only its
+        # first few visual lines.
+        next_project_index = next(
+            (candidate_index for candidate_index in range(index + 1, len(lines))
+             if _looks_like_project_title(lines[candidate_index])),
+            len(lines),
+        )
+        project_lines = lines[index:next_project_index]
         context = " ".join(project_lines)
         tech, _ = _skills_with_evidence(project_lines, "Projects")
         project = {"title": title[:120], "technologies_used": tech}
@@ -995,7 +1094,7 @@ def extract_structured_evidence(resume_text: str) -> dict:
     skills, evidence = _skills_with_evidence(sections["skills"], "Skills")
     experience = _deterministic_experience(sections["experience"], headline_title)
     projects = _deterministic_projects(sections["projects"])
-    for section_name in ("experience", "projects"):
+    for section_name in ("experience", "projects", "certifications"):
         found, found_evidence = _skills_with_evidence(sections[section_name], section_name.title())
         skills.extend(found)
         evidence.extend(found_evidence)
