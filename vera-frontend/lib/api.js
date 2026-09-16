@@ -54,6 +54,11 @@ export function getJD(roleId) {
   return request(`/jds/${encodeURIComponent(roleId)}`);
 }
 
+/** Remove the previous candidate batch and its results, while retaining saved JDs. */
+export function startNewScreening() {
+  return request("/screenings/new", { method: "POST" });
+}
+
 /**
  * Upload a batch of resumes (.pdf/.docx) and stream results back as each one finishes,
  * instead of waiting for the whole batch. `onEvent` is called once per line the backend
