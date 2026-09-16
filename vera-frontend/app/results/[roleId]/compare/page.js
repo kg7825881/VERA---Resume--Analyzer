@@ -7,6 +7,7 @@ import { useAppState } from "../../../providers";
 import {
   initials,
   rankAll,
+  passesMandatory,
   mostRecentRole,
   formatEducation,
 } from "../../../../lib/scoring";
@@ -78,7 +79,10 @@ export default function ComparisonPage({ params }) {
 
   const data = state.resultsCache[roleId];
   const all = useMemo(() => (data ? rankAll(data.ranked, data.excluded_hard_gate_failed) : []), [data]);
-  const qualified = useMemo(() => all.filter((r) => r.final_score >= THRESHOLD), [all]);
+  const qualified = useMemo(
+    () => all.filter((r) => passesMandatory(r) && r.final_score >= THRESHOLD),
+    [all]
+  );
 
   if (loading && !data) {
     return (

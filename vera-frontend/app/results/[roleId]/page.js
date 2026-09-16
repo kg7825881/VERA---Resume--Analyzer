@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getResults, listJDs, getJD } from "../../../lib/api";
+import { getResults, listJDs, getJD, startNewScreening } from "../../../lib/api";
 import { useAppState, useToast } from "../../providers";
 import Pill from "../../../components/Pill";
 import { statusFor, initials, passesMandatory, rankAll, CATEGORY_MAX, CATEGORY_LABELS, mostRecentRole } from "../../../lib/scoring";
@@ -17,7 +17,7 @@ export default function ResultsPage({ params }) {
   const { roleId } = params;
   const router = useRouter();
   const toast = useToast();
-  const { state, setCurrentRole, setResultsForRole } = useAppState();
+  const { state, setCurrentRole, setResultsForRole, startNewScreening: clearScreeningState } = useAppState();
 
   const cached = state.resultsCache[roleId];
   const [loading, setLoading] = useState(!cached);
@@ -86,6 +86,16 @@ export default function ResultsPage({ params }) {
     }
   }
 
+  async function handleNewScreening() {
+    try {
+      await startNewScreening();
+      clearScreeningState();
+      router.push("/screen");
+    } catch (err) {
+      toast(`Couldn't start a new screening: ${err.message}`, "error");
+    }
+  }
+
   const data = state.resultsCache[roleId];
   const all = useMemo(() => (data ? rankAll(data.ranked, data.excluded_hard_gate_failed) : []), [data]);
   const scoreColumns = useMemo(
@@ -106,7 +116,7 @@ export default function ResultsPage({ params }) {
   }, [all]);
 
   const qualifyingCount = useMemo(
-    () => all.filter((r) => r.final_score >= COMPARISON_THRESHOLD).length,
+    () => all.filter((r) => passesMandatory(r) && r.final_score >= COMPARISON_THRESHOLD).length,
     [all]
   );
 
@@ -136,7 +146,7 @@ export default function ResultsPage({ params }) {
             <h1>No scores yet</h1>
             <p>{error}</p>
           </div>
-          <button className="btn primary" onClick={() => router.push("/screen")}>
+          <button className="btn primary" onClick={handleNewScreening}>
             ▶ Run an analysis
           </button>
         </div>
