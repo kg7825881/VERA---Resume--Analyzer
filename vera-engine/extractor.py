@@ -799,10 +799,11 @@ def _looks_like_project_title(line: str) -> bool:
 def _coalesce_skill_lines(lines: list[str]) -> list[str]:
     """Join PDF-wrapped lines before splitting a candidate's own skill list."""
     merged = []
-    continuation_prefixes = re.compile(r"^(?:engineering|generation|face)\b", re.I)
+    continuation_prefixes = re.compile(
+        r"^(?:analysis|engineering|face|generation|intelligence|learning)\b", re.I
+    )
     for line in lines:
         previous = merged[-1] if merged else ""
-        after_last_comma = previous.rsplit(",", 1)[-1].strip()
         category_value = previous.partition(":")[2].strip() if ":" in previous else ""
         # A PDF can put words from the same phrase on separate visual columns:
         # "Deep" + "Learning," or "Azure" + "Document" + "Intelligence,".
@@ -814,8 +815,7 @@ def _coalesce_skill_lines(lines: list[str]) -> list[str]:
             and ":" not in line
             and not _looks_like_skill_summary_prose(line)
             and (
-                (category_value and "," not in category_value)
-                or ("," in previous and len(after_last_comma.split()) == 1)
+                category_value and "," not in category_value and len(line.split()) == 1
             )
         )
         if merged and (
@@ -909,6 +909,12 @@ def _explicit_technology_list_items(text: str) -> list[str]:
             # These are explanatory continuations after a valid list, not tools.
             if re.match(r"^(?:to|for|while|reducing|ensuring|allowing|enabling|handling|covering)\b", item, re.I):
                 continue
+            # Project prose can name an input object ("a custom image dataset")
+            # rather than a capability or tool.  Do not promote those objects to
+            # skills merely because they follow "using".
+            if (re.match(r"^(?:a|an|the)\b", item, re.I)
+                    or re.search(r"\bdata(?:set)?s?$", item, re.I)):
+                continue
             if 1 <= len(item.split()) <= 8 and len(item) <= 80:
                 items.append(item)
     return items
@@ -921,6 +927,7 @@ def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], li
     Spark). It never decides whether a resume-specific item is a skill.
     """
     labels_with_source = []
+    capability_list_continues = False
     # A "Tools and Techniques Used" list is commonly wrapped over several PDF
     # lines inside a project or an employment entry, not only in Skills.
     for line in _coalesce_skill_lines(lines):
@@ -934,13 +941,21 @@ def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], li
         # capabilities such as "Data Engineering & Pipelines: Pandas, SQL".
         # Treat those labelled lists as skills, not as certificate names.
         grouped_capability_line = section == "Certifications" and is_labeled
+        capability_continuation = (
+            section == "Certifications"
+            and capability_list_continues
+            and not is_labeled
+            and bool(re.fullmatch(r"[A-Za-z][A-Za-z .+/#&()'-]{0,80}", text))
+            and len(text.split()) <= 6
+        )
         narrative_skills_line = (
             section == "Skills"
             and not technology_line
             and not is_labeled
             and _looks_like_skill_summary_prose(text)
         )
-        if (section == "Skills" and not narrative_skills_line) or technology_line or grouped_capability_line:
+        if ((section == "Skills" and not narrative_skills_line) or technology_line
+                or grouped_capability_line or capability_continuation):
             if technology_line:
                 values = [technology_line.group("items")]
             else:
@@ -965,6 +980,10 @@ def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], li
                         terminal_tool = re.search(r"\busing\s+([A-Za-z][A-Za-z0-9+#._-]{1,})$", item, re.I)
                         if terminal_tool:
                             labels_with_source.append((terminal_tool.group(1), text))
+        if section == "Certifications":
+            # A visual skills column can become a labelled first line followed
+            # by individual bullet lines after PDF extraction.
+            capability_list_continues = grouped_capability_line or capability_continuation
         # Outside a formal Skills section we only use aliases when they appear
         # in ordinary prose. This catches “used PySpark” without treating every
         # noun in a responsibility sentence as a skill.
