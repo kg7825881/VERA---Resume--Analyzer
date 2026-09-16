@@ -8,13 +8,10 @@ scorer.py — scoring engine implementing the simplified methodology:
     the hard mandatory-skill gate; a "related"/"weak" evidence match earns partial score
     toward the category but does NOT by itself clear the gate.
   - Relevant Experience (20%): purely checks total_years >= JD min_years
-  - Job Title Match (15%): candidate's past titles (experience entries) plus, if
-    extractor.py found one, the current title stated in the resume's Summary/Profile
-    section (current_role_title_from_summary) — judged via the SAME judge (judge.py)
-    used for skill evidence, in one call covering all titles at once. This replaced a
-    pure token-overlap approach specifically because it missed genuinely related titles
-    that share no words (e.g. "AI Architect" vs required "Data Engineer") — see
-    job_title_matcher.py's module docstring. Not a hard gate.
+  - Job Title Match (10%): the extracted current/latest employment title is compared
+    with the JD title and its approved title-family references. Exact accepted titles
+    earn full credit, supported adjacent titles earn 80%, and unrelated titles earn 0%.
+    It is not a hard gate.
   - Soft Skills (5%): the JD's soft_preferred_skills, now scored as its own category
     instead of being folded into Preferred Skills — same evidence pipeline.
   - Education (5%): degree match against JD education_requirements
@@ -121,10 +118,9 @@ def _score_experience(candidate_data: dict, jd_data: dict) -> tuple[float, str, 
 
 def _score_job_title(candidate_data: dict, jd_data: dict, judge_fn=judge_evidence) -> tuple[float, str, dict]:
     """
-    Job-title relevance via job_title_matcher.score_job_titles — a single judge call
-    covering ALL of the candidate's past titles (plus their summary-stated current
-    title, if extractor.py found one) as evidence together, classified against the
-    JD's role_title the same way skill evidence is classified. Not a hard gate — a
+    Job-title relevance via job_title_matcher.score_job_titles. It compares the
+    extracted current/latest employment title against the JD's accepted titles.
+    It is not a hard gate — a
     title mismatch costs score but never fails the candidate outright, since a
     genuinely qualified candidate can carry an unconventional past title (e.g. "Data
     Wrangler" instead of "Data Engineer").
@@ -138,7 +134,7 @@ def _score_job_title(candidate_data: dict, jd_data: dict, judge_fn=judge_evidenc
 
     if result["best_match"]:
         notes = (
-            f"Best match: \"{result['best_match']['title']}\" at {result['best_match']['company']} "
+            f"Job title: \"{result['best_match']['title']}\" "
             f"— judged {result['match_level']} against accepted JD title \"{result.get('matched_target_title', role_titles[0])}\""
             + (f" ({result['judge_reason']})" if result.get("judge_reason") else "")
         )
