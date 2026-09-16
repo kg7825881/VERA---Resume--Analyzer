@@ -113,6 +113,11 @@ def get_jd(role_id: str):
 
 # --- Resumes ---
 
+@app.post("/screenings/new")
+def start_new_screening():
+    """Start a clean candidate batch while keeping the saved JD library intact."""
+    return db.clear_screening_data()
+
 @app.post("/resumes/upload")
 def upload_resumes(files: List[UploadFile] = File(...)):
     """Batch upload — individual file failures don't stop the rest (per Phase 2 design).
