@@ -9,24 +9,13 @@ synonyms/related roles that share no words at all (e.g. "AI Architect" vs
 required "Data Engineer" scores 0 despite plausibly being a related role,
 depending on context). That limitation is exactly what this revision fixes.
 
-Now reuses the SAME judge (judge.py) already used for skill/requirement
-evidence classification, rather than introducing a second similarity
-mechanism (embeddings) or a synonym table to maintain. All of a candidate's
-past titles — plus, if extracted, their current-role title pulled from a
-resume Summary/Profile section (see extractor.py's
-current_role_title_from_summary field) — are handed to the judge as evidence
-chunks in ONE call, same shape as a BM25-retrieved evidence list for a skill.
-This deliberately costs exactly one extra judge call per candidate (not one
-per past title), keeping this in line with the rest of the pipeline's
-"one model, minimal calls" design.
+The matcher uses the extracted current/latest employment title only. Exact
+matches to the JD title or its approved title-family references receive full
+credit. A supported adjacent title can receive partial credit; an unsupported
+title receives none. The judge is used only for that non-exact decision.
 
-Jaccard token overlap is NOT gone — it's kept purely as a deterministic,
-inspectable way to pick which past title to surface as "best_match" for
-display (e.g. in the Evidence panel), sorted alongside every other title in
-all_titles. It no longer drives the actual score; the judge's
-direct/related/weak/none classification does, via the same
-MATCH_LEVEL_CONTRIBUTION mapping matcher.py already uses for skills — so a
-job-title match and a skill match mean the same thing on the same 0-1 scale.
+Jaccard token overlap is retained only as inspectable display metadata. It
+does not decide the score.
 """
 
 import re
@@ -101,6 +90,22 @@ def _is_plausible_title(value: str) -> bool:
     text = (value or "").strip()
     words = re.findall(r"[A-Za-z0-9+#.&/-]+", text)
     return bool(text) and len(text) <= 100 and len(words) <= 12 and not re.search(r"[.;\n]", text)
+
+
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _employment_recency_key(entry: dict) -> tuple[int, int]:
+    """Sort an employment record by its stated end date without guessing dates."""
+    value = (entry.get("end_date_raw") or "").strip().casefold()
+    if re.fullmatch(r"(?:present|current|ongoing|till date)", value):
+        return (9999, 12)
+    year = re.search(r"\b(19\d{2}|20\d{2})\b", value)
+    month = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep(?:t)?|oct|nov|dec)[a-z]*\.?", value)
+    return (int(year.group(1)) if year else 0, _MONTHS.get(month.group(1)[:3], 12) if month else 12)
 
 
 def _tokenize(text: str) -> set:
@@ -207,39 +212,32 @@ def _reason_falsely_cites_jd_title(judge_reason: str, evidence_titles_text: str,
 
 
 def _collect_candidate_titles(candidate_data: dict) -> list[dict]:
+    """Return only the extracted current/latest employment title for scoring.
+
+    The persistence key retains its old name for database compatibility, but
+    extractor.py now stores the latest work-history title in it.  Matching a
+    single role prevents an older, unrelated job or a summary sentence from
+    becoming the displayed job-title evidence.
     """
-    Every distinct title worth judging against the JD's role title: the
-    candidate's past experience-entry titles, plus — if extractor.py found
-    one — a title stated in the resume's Summary/Profile section
-    (current_role_title_from_summary). The summary title is included even
-    when it duplicates the first experience entry's title (harmless — dedup
-    below handles it) and matters most when a resume's most recent role
-    ISN'T clearly the first dated experience entry (unusual ordering,
-    a title that only appears in prose, etc.) — exactly the gap the summary
-    field exists to cover.
+    roles = [
+        entry for entry in (candidate_data.get("experience", []) or [])
+        if _is_plausible_title((entry.get("title") or "").strip())
+    ]
+    if roles:
+        latest = max(roles, key=_employment_recency_key)
+        return [{
+            "title": latest["title"].strip(),
+            "company": (latest.get("company") or "").strip(),
+        }]
 
-    Deduplicates case-insensitively, preserving first-seen order (summary
-    title first, since it's the most likely "current" signal).
-    """
-    titles: list[dict] = []
-    seen = set()
+    current_title = (candidate_data.get("current_role_title_from_summary") or "").strip()
+    if not _is_plausible_title(current_title):
+        return []
 
-    summary_title = (candidate_data.get("current_role_title_from_summary") or "").strip()
-    if _is_plausible_title(summary_title):
-        titles.append({"title": summary_title, "company": "(from resume summary)"})
-        seen.add(summary_title.lower())
-
-    for entry in candidate_data.get("experience", []) or []:
-        title = (entry.get("title") or "").strip()
-        if not title:
-            continue
-        key = title.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        titles.append({"title": title, "company": entry.get("company") or "unknown company"})
-
-    return titles
+    # This is only reachable for a valid headline fallback where the resume
+    # had no structured employment title.  It is deliberately not described
+    # as summary evidence in any response or UI surface.
+    return [{"title": current_title, "company": ""}]
 
 
 def _target_titles(target_role_titles: str | list[str]) -> list[str]:
@@ -263,11 +261,9 @@ def _target_titles(target_role_titles: str | list[str]) -> list[str]:
 
 def score_job_titles(candidate_data: dict, target_role_titles: str | list[str], judge_fn=judge_evidence) -> dict:
     """
-    Scores how closely a candidate's job titles (past roles + summary-stated
-    current title) relate to the JD's role_title.
-    
-    Applies a deterministic check on the latest role first: >= 50% similarity 
-    yields an 85% match. Falls back to a single judge call if not met.
+    Scores the extracted current/latest employment title against the accepted
+    JD role titles. Exact accepted titles receive 100%, supported adjacent
+    titles receive 80%, and unsupported titles receive 0%.
     """
     titles = _collect_candidate_titles(candidate_data)
     accepted_titles = _target_titles(target_role_titles)
@@ -326,7 +322,7 @@ def score_job_titles(candidate_data: dict, target_role_titles: str | list[str], 
     evidence_chunks = [{
         "text": latest_title_dict["title"],
         "source_type": "job_title",
-        "source_label": f"{latest_title_dict['title']} at {latest_title_dict['company']}",
+        "source_label": latest_title_dict["title"],
     }]
     requirement = "Accepted JD job titles (match any one): " + "; ".join(accepted_titles)
     judgment = judge_fn(requirement, evidence_chunks)
