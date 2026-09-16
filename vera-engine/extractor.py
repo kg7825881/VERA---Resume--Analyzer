@@ -3,7 +3,6 @@ import re
 import json
 import logging
 
-import ollama
 import pymupdf as fitz  # PyMuPDF — `import fitz` directly is deprecated, `import pymupdf as fitz` is the current form
 import pymupdf4llm
 from docx import Document
@@ -339,7 +338,7 @@ _STRUCTURED_EVIDENCE_SCHEMA = {
 }
 
 
-def extract_structured_evidence(resume_text):
+def extract_structured_evidence_llm_legacy(resume_text):
     """Sends already-exact resume markdown to Qwen to extract structured JSON."""
 
     system_prompt = (
@@ -653,11 +652,381 @@ def _check_experience_completeness(raw_text: str, structured: dict) -> list:
     ]
 
 
+# --- Stage 2: deterministic, section-aware resume extraction (no LLM) ---
+
+_RESUME_SECTIONS = {
+    "skills": r"(?:technical |professional )?skills?(?:\s*(?:and|&)\s*(?:technologies|tools?))?|core competenc(?:y|ies)|technology stack",
+    "experience": r"(?:professional |work |employment )?experience|work history|career history",
+    "projects": r"(?:key |personal |academic )?projects?",
+    "education": r"education(?:al background)?(?:\s*(?:and|&)\s*certifications?)?|academic qualifications?",
+    "certifications": r"certifications?|licenses?",
+    "summary": r"(?:professional )?(?:summary|profile)|objective|about me",
+}
+_SECTION_HEADING_RE = re.compile(r"^\s*(?:#{1,6}\s*)?(" + "|".join(_RESUME_SECTIONS.values()) + r")\s*:?\s*$", re.I)
+_DATE_RANGE_RE = re.compile(
+    r"\b(?P<start>(?:[A-Za-z]{3,9}\.?\s*\d{2,4}|\d{4}))\s*(?:-|\u2013|\u2014|to)\s*"
+    r"(?P<end>(?:[A-Za-z]{3,9}\.?\s*\d{2,4}|\d{4}|present|current|ongoing|till date))\b", re.I)
+_DEGREE_RE = re.compile(
+    r"\b(?P<degree>b\.?tech|m\.?tech|b\.?e\.?|m\.?e\.?|b\.?s\.?|m\.?s\.?|b\.?sc\.?|m\.?sc\.?|bca|mca|mba|pgdm|bachelor(?:'s)?|master(?:'s)?|ph\.?d)\b"
+    r"(?:\s+(?:in|of)\s+(?P<field>[A-Za-z& /-]{2,80}))?", re.I)
+
+# Canonical aliases are used for both Skills headings and technology mentions in
+# Projects/Experience.  This is intentionally explicit and repeatable.
+_RESUME_ALIASES = (
+    ("Spark", r"\b(?:pyspark|apache spark|spark)\b"),
+    ("Airflow", r"\b(?:apache )?airflow(?: dags?)?\b"),
+    ("OCR", r"\bocr\b|optical character recognition"),
+    ("dbt", r"\bdbt\b"), ("Dagster", r"\bdagster\b"),
+    ("Kafka", r"\b(?:apache )?kafka\b"), ("SQL", r"\bsql\b"),
+    ("Python", r"\bpython\b"), ("Docker", r"\bdocker\b"),
+    ("Kubernetes", r"\bkubernetes\b|\bk8s\b"),
+    ("FastAPI", r"\bfastapi\b"), ("Django", r"\bdjango\b"),
+    ("Databricks", r"\b(?:azure )?databricks\b"),
+)
+_NON_SKILL_HEADINGS = re.compile(
+    r"^(?:awards?|(?:other\s+)?achievements?(?:\s+and\s+personal\s+interests?)?|"
+    r"personal\s+interests?|extra[- ]curricular|interests?|publications?|"
+    r"languages?|volunteering|references?)$",
+    re.I,
+)
+_PROJECT_TITLE_HINT = re.compile(r"\b(?:ai|automation|system|platform|generation|annotation|assessment|optim(?:isation|ization)|model|planner)\b", re.I)
+_TECHNOLOGY_LABEL_RE = re.compile(
+    r"^\s*(?:tech(?:nologies)?(?:\s+used)?|"
+    r"tools?(?:\s*(?:and|&|/)\s*(?:technologies|techniques))?(?:\s+used)?|"
+    r"technology stack|tech stack|frameworks?|languages?)\s*[:–—-]\s*(?P<items>.+)$",
+    re.I,
+)
+
+
+def _clean_resume_markup(value: str) -> str:
+    """Remove predictable DOCX/PDF-to-Markdown decoration without changing words."""
+    value = re.sub(r"</?[^>]+>", "", value or "")
+    value = re.sub(r"[*_`]+", "", value)
+    # PDF extraction can join a role title to its following month, e.g.
+    # "Business AnalystMay 2016". Restore that boundary before date parsing.
+    value = re.sub(
+        r"(?<=[a-z)])(?=(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*\d{2,4}\b)",
+        " ",
+        value,
+        flags=re.I,
+    )
+    # Keep ':' because it identifies an explicit skill category or tools list.
+    return re.sub(r"\s+", " ", value).strip(" #-/\t")
+
+
+def _section_for_heading(line: str) -> str | None:
+    heading = _clean_resume_markup(line).casefold()
+    if not heading or len(heading) > 80 or any(token in heading for token in (".", ",", ";")):
+        return None
+    for name, pattern in _RESUME_SECTIONS.items():
+        # A section heading must be the whole short line.  Treating a sentence that
+        # happens to contain “project” as a heading loses the surrounding experience.
+        if re.fullmatch(pattern, heading, re.I):
+            return name
+    return None
+
+
+def _section_with_inline_content(line: str) -> tuple[str | None, str]:
+    """Recognise flattened PDF lines such as 'SKILLS AND TECHNOLOGIES Python, SQL'."""
+    for name, pattern in _RESUME_SECTIONS.items():
+        # Inside a project/role, "Technology Stack: ..." is a technology list,
+        # not a new top-level Skills section.
+        if name == "skills" and re.match(r"^technology stack\s*[:–—-]", line, re.I):
+            continue
+        match = re.match(rf"^(?:{pattern})(?:\s*[:–—-]?\s+)(?P<content>.+)$", line, re.I)
+        if match:
+            return name, match.group("content").strip()
+    return None, ""
+
+
+def _resume_section_lines(text: str) -> dict[str, list[str]]:
+    sections = {name: [] for name in _RESUME_SECTIONS}
+    current = "other"
+    for raw in (text or "").replace("\r", "").splitlines():
+        # Markdown/PDF conversion can stack markers ("- • Tools Used ...").
+        # Remove every leading marker so the actual label remains detectable.
+        line = _clean_resume_markup(re.sub(r"^\s*(?:(?:[-•])\s*)+", "", raw))
+        if not line:
+            continue
+        section = _section_for_heading(line)
+        if section:
+            current = section
+            continue
+        else:
+            inline_section, inline_content = _section_with_inline_content(line)
+            if inline_section:
+                current = inline_section
+                sections[current].append(inline_content)
+                continue
+        if _NON_SKILL_HEADINGS.fullmatch(line):
+            current = "other"
+        elif (
+            current == "skills"
+            and _looks_like_project_title(line)
+            and (
+                line.isupper()
+                or not (
+                    sections[current]
+                    and (
+                        ":" in sections[current][-1]
+                        or sections[current][-1].rstrip().endswith(",")
+                    )
+                )
+            )
+        ):
+            current = "projects"
+            sections[current].append(line)
+        else:
+            sections.setdefault(current, []).append(line)
+    return sections
+
+
+def _looks_like_project_title(line: str) -> bool:
+    """Recognise an unlabelled project heading without classifying prose as skills."""
+    words = line.split()
+    return (
+        3 <= len(words) <= 12
+        and len(line) <= 100
+        and line[:1].isupper()
+        and ":" not in line
+        and not line.rstrip().endswith(",")
+        and not re.search(r"[.!?]$", line)
+        and bool(_PROJECT_TITLE_HINT.search(line))
+        and sum(word[:1].isupper() for word in words) >= max(2, len(words) // 2)
+    )
+
+
+def _coalesce_skill_lines(lines: list[str]) -> list[str]:
+    """Join PDF-wrapped lines before splitting a candidate's own skill list."""
+    merged = []
+    continuation_prefixes = re.compile(r"^(?:engineering|generation|face)\b", re.I)
+    for line in lines:
+        previous = merged[-1] if merged else ""
+        after_last_comma = previous.rsplit(",", 1)[-1].strip()
+        category_value = previous.partition(":")[2].strip() if ":" in previous else ""
+        # A PDF can put words from the same phrase on separate visual columns:
+        # "Deep" + "Learning," or "Azure" + "Document" + "Intelligence,".
+        # Continue only an unfinished first/list item, never an entire sentence.
+        continues_wrapped_phrase = (
+            line[:1].isupper()
+            and not _TECHNOLOGY_LABEL_RE.match(line)
+            and not line.rstrip().endswith(":")
+            and ":" not in line
+            and (
+                (category_value and "," not in category_value)
+                or ("," in previous and len(after_last_comma.split()) == 1)
+            )
+        )
+        if merged and (
+            previous.endswith((",", "-", "/", "+", "&", ":"))
+            or (line[:1].islower() and ":" not in line)
+            or continuation_prefixes.match(line)
+            or continues_wrapped_phrase
+        ):
+            merged[-1] = f"{previous.rstrip('-')} {line}".strip()
+        else:
+            merged.append(line)
+    return merged
+
+
+def _split_skill_items(value: str) -> list[str]:
+    """Split list punctuation while keeping commas inside a parenthesized skill."""
+    # Text extractors occasionally duplicate an opening parenthesis at a wrapped
+    # line. One opening parenthesis is enough to preserve the grouped tool list.
+    value = re.sub(r"\(\s*\(", "(", value)
+    items, buffer, depth = [], [], 0
+    for character in value:
+        if character in "([{" :
+            depth += 1
+        elif character in ")] }".replace(" ", ""):
+            depth = max(0, depth - 1)
+        if character in ",;•|+" and depth == 0:
+            items.append("".join(buffer))
+            buffer = []
+        else:
+            buffer.append(character)
+    items.append("".join(buffer))
+    return [item.strip() for item in items]
+
+
+def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], list[dict]]:
+    """Extract candidate-written skill items, not only terms in a central catalog.
+
+    The alias map only unifies known equivalents (for example, PySpark becomes
+    Spark). It never decides whether a resume-specific item is a skill.
+    """
+    labels_with_source = []
+    # A "Tools and Techniques Used" list is commonly wrapped over several PDF
+    # lines inside a project or an employment entry, not only in Skills.
+    for line in _coalesce_skill_lines(lines):
+        text = line.strip()
+        if not text:
+            continue
+        technology_line = _TECHNOLOGY_LABEL_RE.match(text)
+        if section == "Skills" or technology_line:
+            left, separator, right = text.partition(":")
+            is_labeled = bool(separator)
+            if technology_line:
+                values = [technology_line.group("items")]
+            else:
+                values = ([left] if is_labeled else []) + ([right] if is_labeled else [text])
+            for value in values:
+                for item in _split_skill_items(value):
+                        item = re.sub(r"\s+", " ", item).strip(" .-–—")
+                        item = re.sub(r"^(?:and|including|with)\s+", "", item, flags=re.I)
+                        if item.startswith("(") and item.count("(") > item.count(")"):
+                            item = item.lstrip("(").strip()
+                        if item.endswith(")") and item.count(")") > item.count("("):
+                            item = item.rstrip(")").strip()
+                        if not item or len(item) > 80 or len(item.split()) > 8:
+                            continue
+                        if re.fullmatch(r"(?:skills?|tools?|technologies|frameworks?|languages|tech|misc|platforms?|core frameworks?)", item, re.I):
+                            continue
+                        labels_with_source.append((item, text))
+        # Outside a formal Skills section we only use aliases when they appear
+        # in ordinary prose. This catches “used PySpark” without treating every
+        # noun in a responsibility sentence as a skill.
+        if section in {"Experience", "Projects"}:
+            for canonical, pattern in _RESUME_ALIASES:
+                if re.search(pattern, text, re.I):
+                    labels_with_source.append((canonical, text))
+    seen, skills, evidence = set(), [], []
+    for raw_label, source in labels_with_source:
+        label = raw_label
+        for canonical, pattern in _RESUME_ALIASES:
+            if re.fullmatch(pattern, raw_label, re.I):
+                label = canonical
+                break
+        key = label.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        skills.append(label)
+        evidence.append({"skill": label, "source_section": section, "evidence": source[:300]})
+    return skills, evidence
+
+
+def _deterministic_experience(lines: list[str], fallback_title: str = "") -> list[dict]:
+    entries = []
+    for index, line in enumerate(lines):
+        date = _DATE_RANGE_RE.search(line)
+        if not date:
+            continue
+        next_role_index = next(
+            (candidate_index for candidate_index in range(index + 1, len(lines))
+             if _DATE_RANGE_RE.search(lines[candidate_index])),
+            len(lines),
+        )
+        role_lines = lines[max(0, index - 3):next_role_index]
+        context = " ".join(role_lines)
+        nearby = lines[max(0, index - 2):index + 2]
+        title_company = next((value for value in nearby if re.search(
+            r"\b(?:engineer|scientist|analyst|manager|developer|consultant|architect|lead|intern)\b", value, re.I)), "")
+        if not title_company:
+            # Some PDF layouts put the date at the end of a large job block.  Use
+            # the first explicit role/company header in that Experience section.
+            title_company = next((value for value in lines if re.search(
+                r"\b(?:engineer|scientist|analyst|manager|developer|consultant|architect|lead|intern)\b", value, re.I)), "")
+        parts = re.split(r"\s*(?:\||@|,|\bat\b|—|–)\s*", title_company, maxsplit=1, flags=re.I)
+        if len(parts) > 1:
+            company, title = parts[0].strip(), parts[1].strip()
+        else:
+            title, company = title_company.strip() or fallback_title, ""
+        title = _DATE_RANGE_RE.sub("", title).strip(" -–—,)")
+        # Keep physical lines separate: an explicit "Tools and Techniques Used"
+        # label may appear after the role date, and matching it requires the line
+        # to begin with that label.
+        tech, _ = _skills_with_evidence(role_lines, "Experience")
+        entries.append({"title": title, "company": company, "start_date_raw": date.group("start"),
+                        "end_date_raw": date.group("end"), "domain": "", "technologies_used": tech})
+    return _dedupe_experience_entries(entries)
+
+
+def _dedupe_experience_entries(entries: list[dict]) -> list[dict]:
+    seen, output = set(), []
+    for entry in entries:
+        key = tuple((entry.get(field) or "").casefold() for field in ("title", "company", "start_date_raw", "end_date_raw"))
+        if key not in seen:
+            seen.add(key)
+            output.append(entry)
+    return output
+
+
+def _deterministic_projects(lines: list[str]) -> list[dict]:
+    projects = []
+    for index, line in enumerate(lines):
+        if len(line) > 100 or _DATE_RANGE_RE.search(line) or not _looks_like_project_title(line):
+            continue
+        title = re.sub(r"^[-•#\s]+", "", line).strip()
+        if not title or title.lower().startswith(("tools", "technologies", "description")):
+            continue
+        project_lines = lines[index:min(len(lines), index + 5)]
+        context = " ".join(project_lines)
+        tech, _ = _skills_with_evidence(project_lines, "Projects")
+        project = {"title": title[:120], "technologies_used": tech}
+        if tech:
+            project["description"] = context[:500]
+        projects.append(project)
+    return projects
+
+
+def _headline_title(lines: list[str]) -> str:
+    """Read an explicit title near the top; never infer a title from skills."""
+    for line in lines[:15]:
+        candidate = _clean_resume_markup(line)
+        if ("@" not in candidate and not re.search(r"\d", candidate)
+                and re.fullmatch(r"[A-Za-z][A-Za-z .&/()'’-]{2,80}", candidate)
+                and re.search(r"\b(?:engineer|scientist|analyst|manager|developer|consultant|architect|designer|lead|intern)\b", candidate, re.I)):
+            return candidate
+    return ""
+
+
+def _extract_certifications(lines: list[str]) -> list[str]:
+    """Avoid storing ordinary skills/project prose as certifications."""
+    markers = re.compile(r"\b(?:cert(?:ificate|ification|ified)?|course|credential|license|professional|fundamentals)\b", re.I)
+    return [line for line in lines if len(line) <= 180 and markers.search(line)]
+
+
+def extract_structured_evidence(resume_text: str) -> dict:
+    """Deterministically structure a resume; this function makes no model calls."""
+    sections = _resume_section_lines(resume_text)
+    all_lines = [_clean_resume_markup(line) for line in (resume_text or "").splitlines() if line.strip()]
+    headline_title = _headline_title(all_lines)
+    skills, evidence = _skills_with_evidence(sections["skills"], "Skills")
+    experience = _deterministic_experience(sections["experience"], headline_title)
+    projects = _deterministic_projects(sections["projects"])
+    for section_name in ("experience", "projects"):
+        found, found_evidence = _skills_with_evidence(sections[section_name], section_name.title())
+        skills.extend(found)
+        evidence.extend(found_evidence)
+    # Capture an explicit Tech/Tools/Technology Stack label even when a PDF's
+    # layout prevented its parent heading from being classified correctly.
+    found, found_evidence = _skills_with_evidence(all_lines, "Resume")
+    skills.extend(found)
+    evidence.extend(found_evidence)
+    skills = list(dict.fromkeys(skills))
+    education = []
+    for line in sections["education"]:
+        for match in _DEGREE_RE.finditer(line):
+            education.append({"degree_level": match.group("degree"), "field": (match.group("field") or "").strip(), "institution": ""})
+    certifications = _extract_certifications(sections["certifications"] + sections["education"])
+    candidate_name = next((line for line in all_lines[:25] if re.fullmatch(r"[A-Z][A-Z .'-]{2,60}", line)), "")
+    if not candidate_name:
+        candidate_name = next((line for line in all_lines[:25] if 1 < len(line.split()) <= 5 and "@" not in line and not re.search(r"\d", line) and not _section_for_heading(line)), "")
+    summary_text = " ".join(sections["summary"])
+    years_match = re.search(r"\b(\d{1,2})\s*\+?\s*years?\b", summary_text, re.I)
+    title_match = re.search(r"\b(?:senior |lead |principal )?(?:data scientist|data engineer|software engineer|business analyst|product manager|product owner|devops engineer)\b", " ".join(all_lines[:40]), re.I)
+    return {"candidate_name": candidate_name, "current_role_title_from_summary": headline_title or (title_match.group(0) if title_match else ""),
+            "stated_years_experience_from_summary": int(years_match.group(1)) if years_match else 0,
+            "skills": skills, "experience": experience, "education": education,
+            "certifications": certifications, "projects": projects, "skill_evidence": evidence}
+
+
 def ingest_resume(file_path: str) -> dict:
     """
     Full resume ingestion:
       Stage 1 — extract exact text (pymupdf4llm / docx-to-markdown, OCR fallback)
-      Stage 2 — structure via LLM (text/dates only, no arithmetic)
+      Stage 2 — structure using deterministic section and regex rules (no LLM)
       Stage 3 — compute total_years_experience deterministically from the extracted
                 date ranges (experience.py), via range union
     then attach candidate_id/document_id/file_name/extraction metadata.
@@ -672,16 +1041,6 @@ def ingest_resume(file_path: str) -> dict:
 
     structured = extract_structured_evidence(raw_text)
 
-    recovered_skills = _recover_labeled_skill_lines(raw_text, structured)
-    if recovered_skills:
-        warnings.append(
-            f"skills: recovered {len(recovered_skills)} token(s) present in the raw resume "
-            f"text but dropped by Stage 2 extraction ({', '.join(recovered_skills)})."
-        )
-
-    warnings = warnings + _guard_against_fabricated_skills(structured, raw_text)
-    warnings = warnings + _guard_against_fabricated_summary_title(structured, raw_text)
-
     total_years, experience_warnings = compute_total_years(structured.get("experience", []))
     
     # NEW: Check if the summary explicitly stated a higher number of years
@@ -695,7 +1054,6 @@ def ingest_resume(file_path: str) -> dict:
         
     structured["skills_all_sources"] = _aggregate_skills(structured)
     warnings = warnings + experience_warnings
-    warnings = warnings + _check_experience_completeness(raw_text, structured)
 
     for w in warnings:
         logger.warning("[%s] %s", file_name, w)
