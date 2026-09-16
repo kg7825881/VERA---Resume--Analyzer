@@ -670,8 +670,8 @@ _DEGREE_RE = re.compile(
     r"\b(?P<degree>b\.?tech|m\.?tech|b\.?e\.?|m\.?e\.?|b\.?s\.?|m\.?s\.?|b\.?sc\.?|m\.?sc\.?|bca|mca|mba|pgdm|bachelor(?:'s)?|master(?:'s)?|ph\.?d)\b"
     r"(?:\s+(?:in|of)\s+(?P<field>[A-Za-z& /-]{2,80}))?", re.I)
 
-# Canonical aliases are used for both Skills headings and technology mentions in
-# Projects/Experience.  This is intentionally explicit and repeatable.
+# These patterns find technology mentions in prose.  Extraction preserves the
+# exact resume wording; any alias/equivalence decisions belong to the matcher.
 _RESUME_ALIASES = (
     ("Spark", r"\b(?:pyspark|apache spark|spark)\b"),
     ("Airflow", r"\b(?:apache )?airflow(?: dags?)?\b"),
@@ -701,6 +701,10 @@ _TECHNOLOGY_LABEL_RE = re.compile(
 def _clean_resume_markup(value: str) -> str:
     """Remove predictable DOCX/PDF-to-Markdown decoration without changing words."""
     value = re.sub(r"</?[^>]+>", "", value or "")
+    # Markdown PDFs often place several bold category labels on one physical
+    # line, e.g. "**Languages:** Python **Big Data:** Apache Spark".  Retain
+    # each label boundary so the following skill parser never fuses columns.
+    value = re.sub(r"\*\*([^*\n]{1,80}:)\*\*", r" § \1", value)
     value = re.sub(r"[*_`]+", "", value)
     # PDF extraction can join a role title to its following month, e.g.
     # "Business AnalystMay 2016". Restore that boundary before date parsing.
@@ -920,6 +924,28 @@ def _explicit_technology_list_items(text: str) -> list[str]:
     return items
 
 
+def _summary_skill_items(text: str) -> list[str]:
+    """Extract explicitly listed skills from a narrative summary sentence."""
+    found = []
+    # Parentheses in a summary commonly contain a concrete technology list.
+    for group in re.findall(r"\(([^()]{1,300})\)", text):
+        if "," in group:
+            found.extend(_split_skill_items(group))
+    # Keep only the list that follows an explicit skill-introducing phrase.
+    for match in re.finditer(
+        r"\b(?:skilled|proficient|experienced|expert)\s+in\s+([^.!?]{1,300})",
+        text,
+        re.I,
+    ):
+        value = re.split(r",?\s+with\s+(?:a|the)\b|\bthrough\b", match.group(1), maxsplit=1, flags=re.I)[0]
+        found.extend(_split_skill_items(re.sub(r"\s+and\s+", ", ", value, flags=re.I)))
+    # Preserve an explicit acronym-led capability before its example list,
+    # e.g. "ETL/ELT pipelines (Azure Data Factory, ...)".
+    for match in re.finditer(r"\b([A-Z]{2,}(?:/[A-Z]{2,})?\s+(?:pipelines?|workflows?))\b", text):
+        found.append(match.group(1))
+    return [item.strip(" .-–—") for item in found if item.strip(" .-–—")]
+
+
 def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], list[dict]]:
     """Extract candidate-written skill items, not only terms in a central catalog.
 
@@ -931,37 +957,38 @@ def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], li
     # A "Tools and Techniques Used" list is commonly wrapped over several PDF
     # lines inside a project or an employment entry, not only in Skills.
     for line in _coalesce_skill_lines(lines):
-        text = line.strip()
-        if not text:
-            continue
-        technology_line = _TECHNOLOGY_LABEL_RE.match(text)
-        left, separator, right = text.partition(":")
-        is_labeled = bool(separator)
-        # On page-two resumes, a "Certifications" region can contain grouped
+        for segment in line.split("§"):
+            text = segment.strip()
+            if not text:
+                continue
+            technology_line = _TECHNOLOGY_LABEL_RE.match(text)
+            left, separator, right = text.partition(":")
+            is_labeled = bool(separator)
+            # On page-two resumes, a "Certifications" region can contain grouped
         # capabilities such as "Data Engineering & Pipelines: Pandas, SQL".
         # Treat those labelled lists as skills, not as certificate names.
-        grouped_capability_line = section == "Certifications" and is_labeled
-        capability_continuation = (
+            grouped_capability_line = section == "Certifications" and is_labeled
+            capability_continuation = (
             section == "Certifications"
             and capability_list_continues
             and not is_labeled
             and bool(re.fullmatch(r"[A-Za-z][A-Za-z .+/#&()'-]{0,80}", text))
             and len(text.split()) <= 6
-        )
-        narrative_skills_line = (
+            )
+            narrative_skills_line = (
             section == "Skills"
             and not technology_line
             and not is_labeled
             and _looks_like_skill_summary_prose(text)
-        )
-        if ((section == "Skills" and not narrative_skills_line) or technology_line
-                or grouped_capability_line or capability_continuation):
-            if technology_line:
-                values = [technology_line.group("items")]
-            else:
-                values = ([left] if is_labeled else []) + ([right] if is_labeled else [text])
-            for value in values:
-                for item in _split_skill_items(value):
+            )
+            if ((section == "Skills" and not narrative_skills_line) or technology_line
+                    or grouped_capability_line or capability_continuation):
+                if technology_line:
+                    values = [technology_line.group("items")]
+                else:
+                    values = ([left] if is_labeled else []) + ([right] if is_labeled else [text])
+                for value in values:
+                    for item in _split_skill_items(value):
                         item = re.sub(r"\s+", " ", item).strip(" .-–—")
                         item = re.sub(r"^(?:and|including|with)\s+", "", item, flags=re.I)
                         if item.startswith("(") and item.count("(") > item.count(")"):
@@ -980,26 +1007,26 @@ def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], li
                         terminal_tool = re.search(r"\busing\s+([A-Za-z][A-Za-z0-9+#._-]{1,})$", item, re.I)
                         if terminal_tool:
                             labels_with_source.append((terminal_tool.group(1), text))
-        if section == "Certifications":
-            # A visual skills column can become a labelled first line followed
-            # by individual bullet lines after PDF extraction.
-            capability_list_continues = grouped_capability_line or capability_continuation
-        # Outside a formal Skills section we only use aliases when they appear
-        # in ordinary prose. This catches “used PySpark” without treating every
-        # noun in a responsibility sentence as a skill.
-        if section in {"Experience", "Projects"}:
-            for item in _explicit_technology_list_items(text):
-                labels_with_source.append((item, text))
-            for canonical, pattern in _RESUME_ALIASES:
-                if re.search(pattern, text, re.I):
-                    labels_with_source.append((canonical, text))
+            if section == "Certifications":
+                # A visual skills column can become a labelled first line followed
+                # by individual bullet lines after PDF extraction.
+                capability_list_continues = grouped_capability_line or capability_continuation
+            if section == "Summary":
+                for item in _summary_skill_items(text):
+                    if len(item.split()) <= 8:
+                        labels_with_source.append((item, text))
+            # Outside a formal Skills section we only use aliases when they appear
+            # in ordinary prose. This catches “used PySpark” without treating every
+            # noun in a responsibility sentence as a skill.
+            if section in {"Experience", "Projects", "Summary"}:
+                for item in _explicit_technology_list_items(text):
+                    labels_with_source.append((item, text))
+                for _canonical, pattern in _RESUME_ALIASES:
+                    for mention in re.finditer(pattern, text, re.I):
+                        labels_with_source.append((mention.group(0), text))
     seen, skills, evidence = set(), [], []
     for raw_label, source in labels_with_source:
         label = raw_label
-        for canonical, pattern in _RESUME_ALIASES:
-            if re.fullmatch(pattern, raw_label, re.I):
-                label = canonical
-                break
         key = label.casefold()
         if key in seen:
             continue
@@ -1113,7 +1140,7 @@ def extract_structured_evidence(resume_text: str) -> dict:
     skills, evidence = _skills_with_evidence(sections["skills"], "Skills")
     experience = _deterministic_experience(sections["experience"], headline_title)
     projects = _deterministic_projects(sections["projects"])
-    for section_name in ("experience", "projects", "certifications"):
+    for section_name in ("summary", "experience", "projects", "certifications"):
         found, found_evidence = _skills_with_evidence(sections[section_name], section_name.title())
         skills.extend(found)
         evidence.extend(found_evidence)
@@ -1132,10 +1159,10 @@ def extract_structured_evidence(resume_text: str) -> dict:
     if not candidate_name:
         candidate_name = next((line for line in all_lines[:25] if 1 < len(line.split()) <= 5 and "@" not in line and not re.search(r"\d", line) and not _section_for_heading(line)), "")
     summary_text = " ".join(sections["summary"])
-    years_match = re.search(r"\b(\d{1,2})\s*\+?\s*years?\b", summary_text, re.I)
+    years_match = re.search(r"\b(\d{1,2}(?:\.\d+)?)\s*\+?\s*years?\b", summary_text, re.I)
     title_match = re.search(r"\b(?:senior |lead |principal )?(?:data scientist|data engineer|software engineer|business analyst|product manager|product owner|devops engineer)\b", " ".join(all_lines[:40]), re.I)
     return {"candidate_name": candidate_name, "current_role_title_from_summary": headline_title or (title_match.group(0) if title_match else ""),
-            "stated_years_experience_from_summary": int(years_match.group(1)) if years_match else 0,
+            "stated_years_experience_from_summary": float(years_match.group(1)) if years_match else 0,
             "skills": skills, "experience": experience, "education": education,
             "certifications": certifications, "projects": projects, "skill_evidence": evidence}
 
