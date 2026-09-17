@@ -89,6 +89,21 @@ EQUIVALENT_SKILLS = {
     for item in group
 }
 
+# Evidence phrases that can support a JD capability when the capability name
+# itself is absent. These are related (partial) matches, never substitutes for
+# explicit skills or mandatory-gate passes.
+REFERENCE_SKILL_KEYWORDS = {
+    "ocr": {"document digitization", "text extraction", "image preprocessing", "layout analysis", "handwriting recognition", "pdf parsing", "document classification", "table extraction", "quality validation", "multilingual processing"},
+    "retrieval datasets": {"knowledge corpus", "vector database", "document chunking", "metadata tagging", "relevance ranking", "semantic search", "hybrid retrieval", "data indexing", "source attribution", "retrieval evaluation"},
+    "genai": {"large language models", "prompt engineering", "retrieval augmented generation", "fine tuning", "inference optimization", "content generation", "ai agents", "model evaluation", "guardrails", "responsible ai"},
+    "dagster": {"data orchestration", "software defined assets", "pipeline scheduling", "asset lineage", "job execution", "data quality checks", "partition management", "resource configuration", "observability", "workflow automation"},
+    "dbt": {"data transformation", "sql modeling", "analytics engineering", "data testing", "model documentation", "incremental models", "semantic layer", "data lineage", "warehouse optimization", "version control"},
+    "alerting": {"incident notification", "threshold alerts", "anomaly detection", "escalation policies", "alert routing", "severity classification", "on call management", "root cause analysis", "service level objectives", "alert fatigue reduction"},
+    "monitoring": {"system health", "performance metrics", "log analysis", "infrastructure visibility", "application telemetry", "uptime tracking", "capacity planning", "error tracking", "distributed tracing", "operational dashboards"},
+    "schema design": {"database modeling", "normalization", "entity relationships", "primary keys", "foreign keys", "data types", "index strategy", "constraints", "dimensional modeling", "schema evolution"},
+    "embedding pipelines": {"vector embeddings", "text chunking", "embedding models", "semantic indexing", "batch processing", "similarity search", "vector storage", "metadata enrichment", "embedding refresh", "retrieval optimization"},
+}
+
 
 def _normalize(text: str) -> str:
     return text.strip().lower()
@@ -145,6 +160,16 @@ def _exact_match(required_skill: str, candidate_skills: list[str]) -> str | None
     return None
 
 
+def _reference_keyword_match(required_skill: str, candidate_skills: list[str]) -> tuple[str, str] | None:
+    """Return candidate evidence and reference phrase for a partial capability match."""
+    for candidate in candidate_skills:
+        candidate_norm = _normalize(candidate)
+        for phrase in REFERENCE_SKILL_KEYWORDS.get(_normalize(required_skill), set()):
+            if _word_boundary_contains(phrase, candidate_norm):
+                return candidate, phrase
+    return None
+
+
 def score_single_skill(
     required_skill: str,
     candidate_skills: list[str],
@@ -177,6 +202,19 @@ def score_single_skill(
             "matched_against": matched_against,
             "evidence": [],
             "judge_reason": "",
+        }
+
+    reference_match = _reference_keyword_match(required_skill, candidate_skills)
+    if reference_match is not None:
+        matched_against, reference_phrase = reference_match
+        return {
+            "skill": required_skill,
+            "contribution": MATCH_LEVEL_CONTRIBUTION["related"],
+            "match_type": "reference",
+            "gate_satisfied": False,
+            "matched_against": matched_against,
+            "evidence": [],
+            "judge_reason": f"Related capability evidence: '{reference_phrase}' supports '{required_skill}'.",
         }
 
     evidence_chunks = evidence_index.retrieve(required_skill, top_k=top_k)
@@ -222,6 +260,7 @@ def score_skill_list(
     """
     Scores an entire list of required skills/requirements against a candidate's skill list.
     """
+    required_skills = [skill.strip() for skill in (required_skills or []) if isinstance(skill, str) and skill.strip()]
     if not required_skills:
         return {"results": [], "matched": [], "missing": [], "gate_missing": [], "average_contribution": 1.0}
 
