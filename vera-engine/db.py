@@ -251,6 +251,7 @@ def get_scores_by_role(role_id: str) -> list[dict]:
 
         rows = conn.execute("""
             SELECT s.*, r.candidate_name, r.file_name, r.skills, r.total_years_experience,
+                   r.current_role_title_from_summary,
                    r.experience, r.education, r.certifications, r.projects
             FROM scores s JOIN resumes r ON s.candidate_id = r.candidate_id
             WHERE s.role_id = ? AND s.run_id = ?
