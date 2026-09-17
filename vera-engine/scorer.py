@@ -44,7 +44,7 @@ WEIGHTS = {
     "job_title_match": 0.10,
     "soft_skills": 0.10,
     "education": 0.25,
-    "preferred_skills": 0.5,
+    "preferred_skills": 0.05,
 }
 
 # A fixed "allowed missing" count makes the gate stricter merely because a JD
@@ -234,6 +234,11 @@ def _norm(s: str) -> str:
     return (s or "").strip().lower()
 
 
+def _nonempty_requirements(items: list[str] | None) -> list[str]:
+    """Keep only real JD requirements; blank extraction artifacts are not criteria."""
+    return [item.strip() for item in (items or []) if isinstance(item, str) and item.strip()]
+
+
 def _build_evidence(result: dict) -> list[dict]:
     """
     Converts one score_skill_list result into the per-skill rows for the UI.
@@ -326,9 +331,9 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
     evidence_index = CandidateEvidenceIndex(candidate_data)
 
     # --- Mandatory Skills (exact match earns free credit; otherwise evidence-based) ---
-    jd_mandatory_technical = jd_data.get("mandatory_skills", [])
-    jd_mandatory_domain = jd_data.get("mandatory_domain_requirements", [])
-    jd_mandatory_role_specific = jd_data.get("mandatory_role_specific_requirements", [])
+    jd_mandatory_technical = _nonempty_requirements(jd_data.get("mandatory_skills"))
+    jd_mandatory_domain = _nonempty_requirements(jd_data.get("mandatory_domain_requirements"))
+    jd_mandatory_role_specific = _nonempty_requirements(jd_data.get("mandatory_role_specific_requirements"))
     # Role-specific entries can contain role names or business expectations.
     # They are intentionally not technical-skill gate items: acceptable job
     # titles are evaluated by the title matcher against JD target titles.
@@ -358,8 +363,8 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
     # preferred technical skills, under the single 5-point Preferred Skills
     # weight configured above.
     jd_preferred_skills = (
-        jd_data.get("preferred_technical_skills", [])
-        + jd_data.get("industry_keywords", [])
+        _nonempty_requirements(jd_data.get("preferred_technical_skills"))
+        + _nonempty_requirements(jd_data.get("industry_keywords"))
     )
     pref_result = score_skill_list(
         jd_preferred_skills, candidate_skills, evidence_index, judge_fn, exact_only=False
@@ -367,7 +372,7 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
     pref_score = pref_result["average_contribution"] * WEIGHTS["preferred_skills"] * 100
 
     # --- Soft Skills (split out of the old combined preferred_skills bucket) ---
-    jd_soft_skills = jd_data.get("soft_preferred_skills", [])
+    jd_soft_skills = _nonempty_requirements(jd_data.get("soft_preferred_skills"))
     soft_result = score_skill_list(
         jd_soft_skills, candidate_skills, evidence_index, judge_fn, exact_only=False
     )
@@ -425,8 +430,17 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
         ],
         "mandatory_role_specific_requirements": [
             {
+                # The UI uses the common skill-row shape. Keeping the actual
+                # requirement in `skill` prevents a blank chip from appearing.
+                "skill": item,
                 "requirement": item,
-                "status": "evaluated_as_job_title" if item in _job_title_targets(jd_data) else "not_technical_gate",
+                "status": "weak_match",
+                "match_type": "requirement",
+                "matched_against": (
+                    "Considered through job-title matching; not a technical hard gate"
+                    if item in _job_title_targets(jd_data)
+                    else "Not scored as a technical hard gate"
+                ),
                 "job_title_evidence": job_title_evidence if item in _job_title_targets(jd_data) else [],
             }
             for item in jd_mandatory_role_specific
