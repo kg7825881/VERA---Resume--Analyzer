@@ -82,6 +82,22 @@ def _bounded_related_title(title: str, target_role_title: str) -> str | None:
         return "Adjacent data role; relevant but not the same title."
     if "ai technical lead" in title_text or "technical lead" in title_text and "ai" in title_text:
         return "AI technical leadership is adjacent to the AI data-engineering role."
+    # A resume can state the base role while the JD title adds a speciality,
+    # e.g. "Data Engineer" versus "Data Engineer — AI Data Platform".  This
+    # is relevant but not an approved full-credit title variant.  Match only
+    # a contiguous phrase of at least two role words so generic words such as
+    # "Engineer" never create title credit by themselves.
+    candidate_words = _title_words(title)
+    target_words = _title_words(target_role_title)
+    role_words = {"engineer", "analyst", "developer", "manager", "architect", "consultant", "lead"}
+    for width in range(min(4, len(candidate_words)), 1, -1):
+        for index in range(len(candidate_words) - width + 1):
+            phrase = candidate_words[index:index + width]
+            if not (set(phrase) & role_words):
+                continue
+            if any(target_words[target_index:target_index + width] == phrase
+                   for target_index in range(len(target_words) - width + 1)):
+                return "Matches the JD's base role but does not state its full speciality."
     return None
 
 
@@ -111,6 +127,31 @@ def _employment_recency_key(entry: dict) -> tuple[int, int]:
 def _tokenize(text: str) -> set:
     words = re.findall(r"[a-z0-9]+", (text or "").lower())
     return {w for w in words if w not in STOPWORDS}
+
+
+def _title_words(text: str) -> list[str]:
+    """Words used for strict title-family comparison, preserving their order."""
+    return re.findall(r"[a-z0-9]+", (text or "").casefold())
+
+
+def _is_accepted_title_variant(candidate_title: str, accepted_title: str) -> bool:
+    """True when an approved title appears intact in a qualified resume title.
+
+    Resumes frequently add non-role detail after the title, such as
+    ``Senior Data Engineer (Data Platform)`` or ``Data Engineer (via BluePi)``.
+    Those still state the approved title.  The reverse is intentionally not
+    accepted: a plain ``Data Engineer`` is not promoted to ``Senior Data
+    Engineer`` merely because the two share words.
+    """
+    candidate_words = _title_words(candidate_title)
+    accepted_words = _title_words(accepted_title)
+    if not candidate_words or not accepted_words:
+        return False
+    if candidate_words == accepted_words:
+        return True
+    width = len(accepted_words)
+    return any(candidate_words[index:index + width] == accepted_words
+               for index in range(len(candidate_words) - width + 1))
 
 
 def _jaccard(a: set, b: set) -> float:
@@ -295,7 +336,11 @@ def score_job_titles(candidate_data: dict, target_role_titles: str | list[str], 
     )
     overlap = _jaccard(target_tokens, latest_tokens)
 
-    exact_target_title = next((title for title, tokens in target_token_sets if tokens == latest_tokens), None)
+    exact_target_title = next(
+        (title for title, _ in target_token_sets
+         if _is_accepted_title_variant(latest_title_dict["title"], title)),
+        None,
+    )
     if exact_target_title:
         # Bypass the judge and return deterministic score
         contribution = 1.0
