@@ -44,7 +44,7 @@ WEIGHTS = {
     "job_title_match": 0.10,
     "soft_skills": 0.10,
     "education": 0.25,
-    "preferred_skills": 0.05,
+    "preferred_skills": 0.5,
 }
 
 # A fixed "allowed missing" count makes the gate stricter merely because a JD

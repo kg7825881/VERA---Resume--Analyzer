@@ -48,6 +48,34 @@ def test_approved_title_reference_variants_earn_full_credit(jd_title, candidate_
     assert result["matched_target_title"] == candidate_title
 
 
+def test_approved_title_with_resume_qualifiers_keeps_full_credit():
+    candidate = {
+        "current_role_title_from_summary": "Senior Data Engineer (Data Platform)",
+        "experience": [{
+            "title": "Senior Data Engineer (Data Platform)",
+            "company": "Example Co",
+            "end_date_raw": "Present",
+        }],
+    }
+
+    result = score_job_titles(candidate, "Data Engineer — AI Data Platform", judge_fn=_no_match_judge)
+
+    assert result["contribution"] == 1.0
+    assert result["matched_target_title"] == "Senior Data Engineer"
+
+
+def test_base_role_without_jd_speciality_is_a_deterministic_related_match():
+    candidate = {
+        "current_role_title_from_summary": "Data Engineer",
+        "experience": [{"title": "Data Engineer", "end_date_raw": "Present"}],
+    }
+
+    result = score_job_titles(candidate, "Data Engineer — AI Data Platform", judge_fn=_no_match_judge)
+
+    assert result["contribution"] == 0.8
+    assert result["match_level"] == "related"
+
+
 def test_only_exact_reference_titles_earn_full_credit_and_related_evidence_is_capped():
     candidate = {
         "current_role_title_from_summary": "Data Scientist",
