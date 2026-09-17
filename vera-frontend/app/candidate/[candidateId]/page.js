@@ -76,6 +76,23 @@ function EvidenceSection({ title, emptyMessage, children }) {
   );
 }
 
+async function copyToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  // Fallback for browsers that do not expose the asynchronous Clipboard API.
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
 function CandidateDetail({ params }) {
   const { candidateId } = params;
   const searchParams = useSearchParams();
@@ -85,6 +102,7 @@ function CandidateDetail({ params }) {
   const roleId = searchParams.get("role") || state.currentRole?.role_id;
   const [loading, setLoading] = useState(!state.resultsCache[roleId]);
   const [error, setError] = useState(null);
+  const [summaryCopied, setSummaryCopied] = useState(false);
 
   useEffect(() => {
     if (!roleId) return;
@@ -158,7 +176,17 @@ function CandidateDetail({ params }) {
   const ringGradient = `conic-gradient(var(--a) 0 ${record.final_score}%, #173047 ${record.final_score}%)`;
   const hasExperienceRequirement = Boolean(sections.experience.years);
   const hasEducationRequirement = record.evidence?.education?.[0]?.status !== "not_required";
-  const candidateRole = sections.jobTitle?.best_match?.title || "";
+  const candidateRole = sections.jobTitle?.best_match?.title || record.current_role_title_from_summary || "";
+  const copyRankingSummary = async () => {
+    const text = [`Why ranked #${record.rank}?`, "", ...explanation.map((item) => `• ${item}`)].join("\n");
+    try {
+      await copyToClipboard(text);
+      setSummaryCopied(true);
+      window.setTimeout(() => setSummaryCopied(false), 2000);
+    } catch {
+      setSummaryCopied(false);
+    }
+  };
 
   return (
     <section className="view active">
@@ -318,6 +346,15 @@ function CandidateDetail({ params }) {
         <div className="panel">
           <div className="head">
             <h3>Why ranked #{record.rank}?</h3>
+            <button
+              type="button"
+              className="btn"
+              onClick={copyRankingSummary}
+              aria-label="Copy ranking summary"
+              style={{ padding: "7px 11px", fontSize: 12 }}
+            >
+              {summaryCopied ? "Copied" : "Copy"}
+            </button>
           </div>
           <div className="body explain">
             <ul style={{ paddingLeft: "16px", margin: 0, textAlign: "left" }}>
