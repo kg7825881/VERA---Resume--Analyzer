@@ -1,8 +1,10 @@
 import pytest
 
 from job_title_matcher import score_job_titles
-from matcher import _exact_match
+from matcher import _exact_match, score_single_skill
+from retrieval import CandidateEvidenceIndex
 from scorer import calculate_job_fit, validate_jd_for_scoring
+from scorer import WEIGHTS
 
 
 def _no_match_judge(requirement, evidence):
@@ -31,6 +33,7 @@ def test_job_title_matches_any_accepted_jd_target_title():
     ("jd_title", "candidate_title"),
     [
         ("Data Engineer — AI Data Platform", "Senior Data Engineer"),
+        ("Data Engineer — AI Data Platform", "AI Architect"),
         ("Senior Business Analyst", "Business Systems Analyst"),
         ("DevOps Engineer", "Site Reliability Engineer"),
         ("Sr Java Lead Engineer", "Java Solutions Architect"),
@@ -136,6 +139,34 @@ def test_generic_word_overlap_does_not_create_a_skill_match():
     assert _exact_match("Data Lakehouse", ["Data Governance"]) is None
 
 
+@pytest.mark.parametrize(
+    ("requirement", "resume_skill"),
+    [
+        ("OCR", "PDF parsing"),
+        ("Retrieval datasets", "semantic search"),
+        ("GenAI", "Prompt engineering"),
+        ("Dagster", "data orchestration"),
+        ("dbt", "SQL modeling"),
+        ("Alerting", "anomaly detection"),
+        ("Monitoring", "distributed tracing"),
+        ("Schema design", "dimensional modeling"),
+        ("Embedding pipelines", "vector embeddings"),
+    ],
+)
+def test_reference_keywords_supply_explainable_partial_skill_evidence(requirement, resume_skill):
+    result = score_single_skill(
+        requirement,
+        [resume_skill],
+        CandidateEvidenceIndex({"skills_all_sources": [resume_skill]}),
+        judge_fn=_no_match_judge,
+    )
+
+    assert result["contribution"] == 0.7
+    assert result["match_type"] == "reference"
+    assert result["matched_against"] == resume_skill
+    assert not result["gate_satisfied"]
+
+
 def test_role_specific_requirements_do_not_become_technical_hard_gate_items():
     candidate = {
         "skills_all_sources": ["Python"],
@@ -147,9 +178,9 @@ def test_role_specific_requirements_do_not_become_technical_hard_gate_items():
     jd = {
         "role_title": "Senior Business Analyst",
         "target_job_titles": ["Senior Business Analyst", "Product Analyst"],
-        "mandatory_skills": ["Python"],
+        "mandatory_skills": ["Python", "  "],
         "mandatory_domain_requirements": [],
-        "mandatory_role_specific_requirements": ["Executive workshops"],
+        "mandatory_role_specific_requirements": ["Executive workshops", ""],
         "preferred_technical_skills": [],
         "industry_keywords": [],
         "soft_preferred_skills": [],
@@ -163,7 +194,9 @@ def test_role_specific_requirements_do_not_become_technical_hard_gate_items():
     assert mandatory["required_count"] == 1
     assert mandatory["matched"] == ["Python"]
     assert not result["hard_gate_failed"]
-    assert result["evidence"]["mandatory_role_specific_requirements"][0]["status"] == "not_technical_gate"
+    row = result["evidence"]["mandatory_role_specific_requirements"][0]
+    assert row["skill"] == "Executive workshops"
+    assert row["status"] == "weak_match"
 
 
 def test_sparse_jd_is_blocked_before_scoring():
@@ -183,3 +216,8 @@ def test_sparse_jd_is_blocked_before_scoring():
     assert validate_jd_for_scoring(jd)
     with pytest.raises(ValueError, match="no extracted skills"):
         calculate_job_fit({}, jd, judge_fn=_no_match_judge)
+
+
+def test_scoring_weights_sum_to_one_and_preferred_skills_cannot_exceed_five_points():
+    assert sum(WEIGHTS.values()) == pytest.approx(1.0)
+    assert WEIGHTS["preferred_skills"] * 100 == 5
