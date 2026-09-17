@@ -56,15 +56,15 @@ export function passesMandatory(record) {
 }
 
 /**
- * Keep candidates who clear mandatory requirements ahead of excluded candidates.
- * Scores order records within each group, but a hard-gate failure can never
- * receive a better rank than an eligible candidate.
+ * Rank candidates by their final Job Fit score.  Mandatory-gate status is
+ * retained on each record for filters and labels, but must not silently move a
+ * higher-scoring candidate below a lower-scoring candidate in the main list.
  */
 export function rankAll(ranked, excluded) {
   const byScore = (a, b) => b.final_score - a.final_score;
-  const eligible = [...(ranked || [])].sort(byScore);
-  const ineligible = [...(excluded || [])].sort(byScore);
-  return [...eligible, ...ineligible].map((r, i) => ({ ...r, rank: i + 1 }));
+  return [...(ranked || []), ...(excluded || [])]
+    .sort(byScore)
+    .map((r, i) => ({ ...r, rank: i + 1 }));
 }
 
 /** Top few matched skills across categories, for a compact "top evidence" table cell. */
