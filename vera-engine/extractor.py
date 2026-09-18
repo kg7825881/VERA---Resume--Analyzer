@@ -14,6 +14,7 @@ import pytesseract
 
 from common import new_id, now_iso
 from experience import compute_total_years
+from title_normalization import split_flattened_company_title
 
 logger = logging.getLogger("talentlens.extractor")
 
@@ -1119,6 +1120,13 @@ def _deterministic_experience(lines: list[str], fallback_title: str = "") -> lis
                 company, title = left, right
         else:
             title, company = title_company.strip() or fallback_title, ""
+            # Some templates omit a visual separator entirely, producing a
+            # flattened header such as "Acme Technologies GenAI Engineer".
+            # Keep the employer separately; only the demonstrated role suffix
+            # may be used as job-title evidence downstream.
+            title, flattened_company = split_flattened_company_title(title)
+            if flattened_company:
+                company = flattened_company
         # Some templates put the dates first, then the employer on the next
         # line, and the role only in the resume headline.  Keep the headline as
         # the role but still store the employer for that entry.
