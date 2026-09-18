@@ -32,6 +32,7 @@ job-title match and a skill match mean the same thing on the same 0-1 scale.
 import re
 from judge import judge_evidence
 from matcher import MATCH_LEVEL_CONTRIBUTION
+from title_normalization import normalize_employment_title
 
 STOPWORDS = {"the", "a", "an", "of", "and", "for"}
 
@@ -70,6 +71,16 @@ ROLE_TITLE_REFERENCE = {
         "Platform Engineer",
         "Infrastructure Engineer",
         "CI/CD Engineer",
+        "Cloud Engineer", 
+        "DevSecOps Engineer", 
+        "Build and Release Engineer", 
+        "Systems Engineer", 
+        "Cloud Infrastructure Engineer", 
+        "Automation Engineer", 
+        "Kubernetes Engineer", 
+        "Reliability Engineer", 
+        "Platform Operations Engineer", 
+        "Infrastructure Automation Engineer",
     ),
     "Sr Java Lead Engineer": (
         "Java Technical Lead",
@@ -77,6 +88,35 @@ ROLE_TITLE_REFERENCE = {
         "Lead Software Engineer — Java",
         "Java Solutions Architect",
         "Backend Engineering Lead",
+        "Senior Java Engineer",  
+        "Lead Java Developer",  
+        "Java Lead Engineer", 
+        "Java Engineering Lead", 
+        "Lead Backend Engineer", 
+        "Senior Backend Engineer", 
+        "Java Software Architect",  
+        "Principal Java Engineer", 
+        "Java Application Lead", 
+        "Senior Software Engineer – Java", 
+        "Lead Software Engineer – Java", 
+        "Java Microservices Lead", 
+        "Spring Boot Lead Developer", 
+        "Full Stack Java Lead",
+    ),
+    "AI Engineer — GenAI Product Engineering": (
+        "AI Engineer",
+        "AI/ML Engineer",
+        "ML Engineer",
+        "Machine Learning Engineer",
+        "GenAI Engineer",
+        "Generative AI Engineer",
+        "LLM Engineer",
+        "NLP Engineer",
+        "AI Software Engineer",
+        "AI Product Engineer",
+        "Software Engineer",
+        "Backend Engineer",
+        "AI Architect",
     ),
 }
 
@@ -84,6 +124,26 @@ ROLE_TITLE_REFERENCE = {
 def _title_key(title: str) -> str:
     """Comparison key that ignores presentation-only punctuation and case."""
     return re.sub(r"[^a-z0-9]+", "", (title or "").casefold())
+
+
+def _reference_key(title: str) -> str:
+    """Compare JD titles without publishing-only bracketed qualifiers.
+
+    A role can be headed "AI Engineer — GenAI Product Engineering
+    [Production focus Role]" while its approved title family is maintained
+    under the stable role name without that document annotation.
+    """
+    unqualified = re.sub(r"\s*[\[(][^\])]{0,120}[\])]\s*", " ", title or "")
+    return _title_key(unqualified)
+
+
+def _candidate_title_key(title: str) -> str:
+    """Ignore a clarifying parenthetical, not meaningful title words.
+
+    For example, a resume may state ``Senior Data Engineer (Data Platform)``
+    while the approved family lists ``Senior Data Engineer``.
+    """
+    return _title_key(re.sub(r"\s*\([^)]{0,80}\)", "", title or ""))
 
 
 def _bounded_related_title(title: str, target_role_title: str) -> str | None:
@@ -227,19 +287,28 @@ def _collect_candidate_titles(candidate_data: dict) -> list[dict]:
     a title that only appears in prose, etc.) — exactly the gap the summary
     field exists to cover.
 
-    Deduplicates case-insensitively, preserving first-seen order (summary
-    title first, since it's the most likely "current" signal).
+    Deduplicates case-insensitively.  A dated current/latest employment role
+    takes precedence over legacy summary fields; this makes matching stable
+    even for existing records created before the role-resolution upgrade.
     """
     titles: list[dict] = []
     seen = set()
 
-    summary_title = (candidate_data.get("current_role_title_from_summary") or "").strip()
-    if _is_plausible_title(summary_title):
-        titles.append({"title": summary_title, "company": "(from resume summary)"})
-        seen.add(summary_title.lower())
+    experience = candidate_data.get("experience", []) or []
 
-    for entry in candidate_data.get("experience", []) or []:
-        title = (entry.get("title") or "").strip()
+    def recency(entry: dict) -> tuple[int, int]:
+        value = (entry.get("end_date_raw") or "").casefold()
+        if re.search(r"\b(?:present|current|ongoing)\b", value):
+            return (9999, 12)
+        year = re.search(r"\b(19\d{2}|20\d{2})\b", value)
+        month = re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep(?:t)?|oct|nov|dec)\b", value)
+        month_number = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+                        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+        return (int(year.group(1)) if year else 0, month_number.get((month.group(1) if month else "")[:3], 0))
+
+    for entry in sorted(experience, key=recency, reverse=True):
+        raw_title = (entry.get("title") or "").strip()
+        title = normalize_employment_title(raw_title)
         if not title:
             continue
         key = title.lower()
@@ -247,6 +316,13 @@ def _collect_candidate_titles(candidate_data: dict) -> list[dict]:
             continue
         seen.add(key)
         titles.append({"title": title, "company": entry.get("company") or "unknown company"})
+
+    summary_title = normalize_employment_title(
+        (candidate_data.get("current_role_title_from_summary") or "").strip()
+    )
+    if _is_plausible_title(summary_title) and summary_title.lower() not in seen:
+        titles.append({"title": summary_title, "company": "(resume headline)"})
+        seen.add(summary_title.lower())
 
     return titles
 
@@ -258,9 +334,9 @@ def _target_titles(target_role_titles: str | list[str]) -> list[str]:
     # First retain the JD's own title variants, then expand a matching primary
     # title with its explicitly approved alternatives from ROLE_TITLE_REFERENCE.
     expanded_titles = list(raw_titles)
-    reference_by_key = {_title_key(primary): alternatives for primary, alternatives in ROLE_TITLE_REFERENCE.items()}
+    reference_by_key = {_reference_key(primary): alternatives for primary, alternatives in ROLE_TITLE_REFERENCE.items()}
     for value in raw_titles:
-        expanded_titles.extend(reference_by_key.get(_title_key(value), ()))
+        expanded_titles.extend(reference_by_key.get(_reference_key(value), ()))
     for value in expanded_titles:
         title = (value or "").strip()
         key = _title_key(title)
@@ -308,7 +384,11 @@ def score_job_titles(candidate_data: dict, target_role_titles: str | list[str], 
     )
     overlap = _jaccard(target_tokens, latest_tokens)
 
-    exact_target_title = next((title for title, tokens in target_token_sets if tokens == latest_tokens), None)
+    latest_title_key = _candidate_title_key(latest_title_dict["title"])
+    exact_target_title = next(
+        (title for title in accepted_titles if _candidate_title_key(title) == latest_title_key),
+        None,
+    )
     if exact_target_title:
         # Bypass the judge and return deterministic score
         contribution = 1.0
