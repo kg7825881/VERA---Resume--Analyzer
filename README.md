@@ -205,6 +205,14 @@ delete the stored database and uploaded documents.
    * Review the **Evidence Panel** to see exactly which skills matched (via exact match or LLM judgment) and read the judge's reasoning.
    * Review extracted experience, parsed education, and additional candidate skills that were not consumed by the JD requirements.
 
+4. **Compact assessment API (`GET /assessments/{role_id}/{candidate_id}`)**
+   * Returns a versioned, review-friendly projection of one scored pairing: compact JD criteria, a candidate summary, and category-level decision data.
+   * It intentionally excludes raw resume content and verbose judge evidence. Use `GET /results/{role_id}` when the full evidence trail is needed.
+
+5. **Tracked analysis runs (`POST /analyze`, `GET /runs/{run_id}`)**
+   * Each analysis validates requested candidate IDs before work begins, creates a durable run and one task per candidate, and records completion, failure, and cache-hit state.
+   * Results are cached by a fingerprint of scoring-relevant JD and candidate data plus a scoring-rules version. A changed requirement, resume fact, or scoring version triggers fresh scoring automatically.
+
 
 ## 📊 Scoring Methodology
 

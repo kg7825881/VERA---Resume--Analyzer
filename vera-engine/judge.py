@@ -19,7 +19,7 @@ import ollama
 
 logger = logging.getLogger("talentlens.judge")
 
-JUDGE_MODEL = "gemma3:1b"
+JUDGE_MODEL = "gemma3:4b"
 
 _LEVELS = ("direct", "related", "weak", "none")
 
@@ -48,14 +48,20 @@ _SYSTEM_PROMPT = (
     "Use EXACTLY one of these four levels:\n"
     '- "direct": the evidence explicitly demonstrates this requirement — the skill, tool, or '
     "concept is clearly present, named, or unambiguously described.\n"
-    '- "related": the evidence shows closely related or adjacent work that strongly implies '
-    "this requirement, without explicitly naming or describing it.\n"
-    '- "weak": the evidence is only tangentially related — plausible, but not a strong signal.\n'
+    '- "related": the evidence shows a concrete, closely related technology, workflow, or '
+    "capability that reasonably demonstrates the requirement in practice, even if it uses "
+    "different terminology. Exact wording is NOT required. For example, ETL/ELT pipelines "
+    "and SQL can support data-transformation work; Databricks or a data lake can support "
+    "lakehouse/warehouse work; and model training, experiments, or evaluation tooling can "
+    "support model-evaluation work when the evidence makes that connection concrete.\n"
+    '- "weak": the evidence shows a real but broader transferable or adjacent capability. '
+    "Give weak rather than none when there is a specific, plausible connection, but do not "
+    "use it for a mere shared word or an unrelated tool.\n"
     '- "none": the evidence does not support this requirement at all (including when the '
     "retrieved evidence is simply irrelevant to the requirement).\n\n"
-    "Base your judgment ONLY on the evidence text provided. Do not assume a skill is present "
-    "just because it is common for similar roles, and do not let the requirement's own wording "
-    "influence your answer beyond what the evidence actually shows. Respond with ONLY a JSON "
+    "Base your judgment ONLY on the evidence text provided. Recognize synonyms, common "
+    "abbreviations, and concrete adjacent capabilities, but do not invent experience merely "
+    "because it is common for similar roles. Do not require an exact phrase match. Respond with ONLY a JSON "
     "object matching this schema, no other text:\n"
     '{"match": "direct" | "related" | "weak" | "none", "confidence": number between 0 and 1, '
     '"reason": "one short sentence explaining the classification"}'

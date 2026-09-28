@@ -5,6 +5,7 @@ pydantic
 pydantic[email]
 PyJWT
 ollama
+sentence-transformers
 rank-bm25
 pymupdf
 pymupdf4llm

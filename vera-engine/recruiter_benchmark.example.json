@@ -1,0 +1,11 @@
+{
+  "description": "Replace these placeholders with recruiter-approved cases before changing scoring weights.",
+  "cases": [
+    {
+      "candidate_id": "candidate-id-from-test-database",
+      "expected_rank": 1,
+      "min_score": 75,
+      "max_score": 100
+    }
+  ]
+}

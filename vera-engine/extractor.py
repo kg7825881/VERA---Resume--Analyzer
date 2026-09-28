@@ -681,6 +681,10 @@ _RESUME_ALIASES = (
     ("Kafka", r"\b(?:apache )?kafka\b"), ("SQL", r"\bsql\b"),
     ("Python", r"\bpython\b"), ("Docker", r"\bdocker\b"),
     ("Kubernetes", r"\bkubernetes\b|\bk8s\b"),
+    ("Git", r"\bgit\b"), ("GitLab", r"\bgitlab\b"),
+    # GitHub Copilot is an AI assistant, not evidence that the candidate used
+    # the GitHub hosting platform.  Keep the two capabilities distinct.
+    ("GitHub", r"\bgithub\b(?!\s+copilot\b)"),
     ("FastAPI", r"\bfastapi\b"), ("Django", r"\bdjango\b"),
     ("Databricks", r"\b(?:azure )?databricks\b"),
 )
@@ -696,6 +700,43 @@ _GENERIC_SKILL_CATEGORY_LABELS = re.compile(
     r"certifications?|technical skills?|technical expertise|skills?(?: and technologies)?)$",
     re.I,
 )
+_NAME_EXCLUSION_WORDS = re.compile(
+    r"\b(?:skills?|technologies|technology|tools?|databases?|cassandra|postgres(?:ql)?|mysql|"
+    r"java|spring|project|projects|experience|employment|education|certifications?|"
+    r"summary|profile|objective|resume|curriculum|vitae|developer|engineer|architect|"
+    r"consultant|manager|lead|technical|software|linkedin|github|email|phone|contact)\b",
+    re.I,
+)
+
+
+def _is_plausible_candidate_name(line: str) -> bool:
+    """Return whether a top-of-resume line is plausibly a person's name.
+
+    PDF reading order can put a skill heading or a technology list before the
+    person's name. Names are therefore intentionally conservative: a valid
+    name contains only letters and ordinary name punctuation, has 2–5 words,
+    and contains no resume-heading, job-title, or technology-list signals.
+    Returning no automatic name is safer than persisting ``Databases:
+    Cassandra`` as a person's identity; HR can correct an unknown name in the
+    UI afterwards.
+    """
+    value = " ".join((line or "").split()).strip()
+    if not value or not re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,80}", value):
+        return False
+    words = [word for word in re.split(r"\s+", value) if word]
+    if not 2 <= len(words) <= 5:
+        return False
+    if _NAME_EXCLUSION_WORDS.search(value) or _section_for_heading(value):
+        return False
+    return True
+
+
+def _candidate_name_from_filename(file_name: str) -> str:
+    """Use a clean filename as a last-resort name, never as a first choice."""
+    stem = os.path.splitext(os.path.basename(file_name or ""))[0]
+    stem = re.sub(r"^(?:hirist|naukri|resume|cv)[ _-]+", "", stem, flags=re.I)
+    candidate = re.sub(r"[_-]+", " ", stem).strip()
+    return candidate if _is_plausible_candidate_name(candidate) else ""
 _PROJECT_TITLE_HINT = re.compile(r"\b(?:ai|automation|system|platform|generation|annotation|assessment|optim(?:isation|ization)|model|planner|pipeline|warehouse)\b", re.I)
 _TECHNOLOGY_LABEL_RE = re.compile(
     r"^\s*(?:tech(?:nologies)?(?:\s+used)?|"
@@ -1068,8 +1109,10 @@ def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], li
                         labels_with_source.append((item, text))
             # Outside a formal Skills section we only use aliases when they appear
             # in ordinary prose. This catches “used PySpark” without treating every
-            # noun in a responsibility sentence as a skill.
-            if section in {"Experience", "Projects", "Summary"}:
+            # noun in a responsibility sentence as a skill.  The final Resume pass
+            # additionally catches standalone platform/profile labels recovered from
+            # PDF headers (for example, a candidate's GitHub link).
+            if section in {"Experience", "Projects", "Summary", "Resume"}:
                 for item in _explicit_technology_list_items(text):
                     labels_with_source.append((item, text))
                 for _canonical, pattern in _RESUME_ALIASES:
@@ -1087,7 +1130,9 @@ def _skills_with_evidence(lines: list[str], section: str) -> tuple[list[str], li
     return skills, evidence
 
 
-def _deterministic_experience(lines: list[str], fallback_title: str = "") -> list[dict]:
+def _deterministic_experience(
+    lines: list[str], fallback_title: str = "", *, allow_global_role_fallback: bool = True,
+) -> list[dict]:
     entries = []
     for index, line in enumerate(lines):
         date = _DATE_RANGE_RE.search(line)
@@ -1102,10 +1147,16 @@ def _deterministic_experience(lines: list[str], fallback_title: str = "") -> lis
         context = " ".join(role_lines)
         nearby = lines[max(0, index - 2):index + 2]
         title_company = next((value for value in nearby if _ROLE_WORD_RE.search(value)), "")
-        if not title_company:
+        if not title_company and allow_global_role_fallback:
             # Some PDF layouts put the date at the end of a large job block.  Use
             # the first explicit role/company header in that Experience section.
             title_company = next((value for value in lines if _ROLE_WORD_RE.search(value)), "")
+        if not title_company:
+            # A date in education/certification text is not employment. When
+            # scanning the entire resume as a layout-recovery pass, require a
+            # title in the local neighbourhood rather than borrowing a role
+            # from an unrelated section.
+            continue
         parts = re.split(r"\s*(?:\||@|,|\bat\b|—|–)\s*", title_company, maxsplit=1, flags=re.I)
         if len(parts) > 1:
             left, right = (part.strip() for part in parts)
@@ -1326,6 +1377,14 @@ def extract_structured_evidence(resume_text: str) -> dict:
     found, found_evidence = _skills_with_evidence(labelled_lines, "Skills")
     skills.extend(found)
     evidence.extend(found_evidence)
+    # PDF reading order can lose the Experience section heading while leaving
+    # the actual title/date blocks intact. Make a conservative whole-document
+    # recovery pass: it accepts only title/date pairs that occur locally, and
+    # merges them with section-derived entries rather than replacing them.
+    recovered_experience = _deterministic_experience(
+        all_lines, headline_title, allow_global_role_fallback=False,
+    )
+    experience = _dedupe_experience_entries([*experience, *recovered_experience])
     if not experience:
         experience = _columnar_experience_fallback(all_lines)
     if not projects:
@@ -1346,13 +1405,14 @@ def extract_structured_evidence(resume_text: str) -> dict:
         for match in _DEGREE_RE.finditer(line):
             education.append({"degree_level": match.group("degree"), "field": (match.group("field") or "").strip(), "institution": ""})
     certifications = _extract_certifications(sections["certifications"] + sections["education"])
-    candidate_name = next((line for line in all_lines[:25]
-                           if re.fullmatch(r"[A-Z][A-Z .'-]{2,60}", line)
-                           and not _section_for_heading(line)
-                           and not re.search(r"\b(?:skills?|expertise|experience|education|projects?|"
-                                             r"summary|profile|certifications?)\b", line, re.I)), "")
+    # A resume name nearly always appears in the opening block, but document
+    # extraction can reorder columns.  Prefer an all-caps name line first,
+    # then a normally-cased plausible name; both use the same strict guard so
+    # skill lists, project headings, and job titles cannot become identities.
+    opening_lines = all_lines[:25]
+    candidate_name = next((line for line in opening_lines if line.isupper() and _is_plausible_candidate_name(line)), "")
     if not candidate_name:
-        candidate_name = next((line for line in all_lines[:25] if 1 < len(line.split()) <= 5 and "@" not in line and not re.search(r"\d", line) and not _section_for_heading(line)), "")
+        candidate_name = next((line for line in opening_lines if _is_plausible_candidate_name(line)), "")
     summary_text = " ".join(summary_lines)
     years_match = re.search(r"\b(\d{1,2}(?:\.\d+)?)\s*\+?\s*years?\b", summary_text, re.I)
     latest_experience_role_title, _ = _latest_experience_role(experience)
@@ -1388,6 +1448,8 @@ def ingest_resume(file_path: str) -> dict:
     print(f"[DEBUG] Stage 1 raw_text ({len(raw_text)} chars, method={method}) written to {_debug_dump_path}")
 
     structured = extract_structured_evidence(raw_text)
+    if not structured.get("candidate_name"):
+        structured["candidate_name"] = _candidate_name_from_filename(file_name)
 
     total_years, experience_warnings = compute_total_years(structured.get("experience", []))
     
@@ -1406,12 +1468,27 @@ def ingest_resume(file_path: str) -> dict:
     for w in warnings:
         logger.warning("[%s] %s", file_name, w)
 
+    document_id = new_id()
+    from source_bundle import build_source_bundle
+    source = build_source_bundle(
+        document_id=document_id, markdown=raw_text, file_name=file_name,
+        extraction_method=method, extraction_warnings=warnings,
+    )
     structured["candidate_id"] = new_id()
-    structured["document_id"] = new_id()
+    structured["document_id"] = document_id
     structured["file_name"] = file_name
     structured["extraction_method"] = method
     structured["extraction_warnings"] = warnings
     structured["uploaded_at"] = now_iso()
+    structured["source_id"] = source["source_id"]
+    structured["source_hash"] = source["source_hash"]
+    structured["source_markdown"] = source["markdown"]
+    structured["source_bundle_version"] = source["bundle_version"]
+    # Persist the source-grounded retrieval corpus with the resume. Later
+    # matching stages therefore reuse the same candidate-isolated evidence
+    # rather than reconstructing a subtly different corpus each run.
+    from chunking import build_evidence_chunks
+    structured["evidence_chunks"] = [chunk.to_dict() for chunk in build_evidence_chunks(structured)]
     return structured
 
 

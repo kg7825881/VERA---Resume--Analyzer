@@ -15,17 +15,21 @@ from jd_skills import DOMAIN_PATTERNS, ROLE_PATTERNS, SKILL_PATTERNS, TARGET_TIT
 logger = logging.getLogger("talentlens.jd_extractor")
 
 _HEADINGS = {
-    "responsibilities": re.compile(r"^(?:key )?(?:responsibilities|what you(?:'ll| will) do)\s*:?$", re.I),
-    "required": re.compile(r"^(?:required|minimum|must[- ]have)(?:\s+(?:skills?|qualifications?|requirements?|&|and))*\s*:?$", re.I),
-    "preferred": re.compile(r"^(?:preferred|nice[- ]to[- ]have|desired)(?:\s+(?:skills?|qualifications?|requirements?|&|and))*\s*:?$", re.I),
-    "education": re.compile(r"^(?:education|education requirements?)\s*:?$", re.I),
+    "responsibilities": re.compile(r"^(?:key )?(?:responsibilities|what you(?:'ll| will) do|job (?:summary|description)|role (?:summary|overview))\s*:?$", re.I),
+    # JDs frequently call their hard-requirement section "Technical Skills",
+    # "Qualifications", or "What we're looking for" rather than "Required".
+    # Keep this deliberately heading-only: skills mentioned in responsibilities do
+    # not become screening gates merely because they occur in a sentence.
+    "required": re.compile(r"^(?:(?:required|minimum|must[- ]have|essential|core|mandatory)(?:\s+(?:technical\s+)?(?:skills?|qualifications?|requirements?|competenc(?:y|ies)|expertise|&|and))*|(?:technical|core|key|essential|mandatory)\s+skills?(?:\s+(?:and|&)\s+(?:competenc(?:y|ies)|technologies|tools))?|(?:technical|core|key|essential|mandatory)\s+(?:competenc(?:y|ies)|expertise)|qualifications?|what we(?:'re| are) looking for|skills?(?:\s+(?:and|&)\s+(?:competenc(?:y|ies)|technologies|tools))?)\s*:?$", re.I),
+    "preferred": re.compile(r"^(?:(?:preferred|nice[- ]to[- ]have|desired|good[- ]to[- ]have|advantageous)(?:\s+(?:technical\s+)?(?:skills?|qualifications?|requirements?|competenc(?:y|ies)))?|additional\s+(?:skills?|qualifications?))\s*:?$", re.I),
+    "education": re.compile(r"^(?:education(?:al)?(?:\s+(?:requirements?|qualifications?|background)|\s+(?:and|&)\s+qualifications?)?|academic\s+qualifications?|degree\s+requirements?)\s*:?$", re.I),
     "certifications": re.compile(r"^(?:certifications?|licenses?)\s*:?$", re.I),
 }
 _STOPWORDS = re.compile(r"\b(?:experience|knowledge|understanding|familiarity|skills?|ability|proficiency|expertise)\b", re.I)
 # Requirement sections commonly say either "3-5 years of experience", "3-8
 # years as a Business Analyst", or "7-10 years of hands-on DevOps experience".
 _YEARS = re.compile(r"\b(\d{1,2})\s*(?:[-–—]|to)\s*(\d{1,2})?\s*\+?\s*years?\b|\b(\d{1,2})\s*\+\s*years?\b", re.I)
-_DEGREE = re.compile(r"\b(bachelor(?:'s)?|master(?:'s)?|b\.?tech|m\.?tech|b\.?e\.?|m\.?e\.?|b\.?s\.?|m\.?s\.?|bca|mca|mba|ph\.?d)\b(?:\s+(?:in|of)\s+([^,;.\n]+))?", re.I)
+_DEGREE = re.compile(r"\b(bachelor(?:'s)?|master(?:'s)?|b\.?\s*tech|m\.?\s*tech|b\.?\s*e\.?|m\.?\s*e\.?|b\.?\s*s\.?|m\.?\s*s\.?|bca|mca|mba|ph\.?\s*d)\b(?:\s+(?:in|of)\s+([^,;.\n]+))?", re.I)
 
 
 def _clean_lines(text: str) -> list[str]:
@@ -106,8 +110,18 @@ def _experience_years(text: str) -> tuple[int | None, int | None]:
 def _education(lines: list[str]) -> list[dict]:
     output = []
     for match in _DEGREE.finditer(_section_text(lines)):
-        output.append({"degree_level": match.group(1), "field": (match.group(2) or "").strip(), "required": True})
-    return output
+        level = match.group(1).strip()
+        # A degree line can list alternatives, e.g. "B.Tech / B.E. / MCA".
+        # `_DEGREE` sees each named degree; retaining each gives the scorer its
+        # intended OR semantics instead of silently dropping B.Tech.
+        output.append({"degree_level": level, "field": (match.group(2) or "").strip(), "required": True})
+    seen, deduped = set(), []
+    for item in output:
+        key = (item["degree_level"].casefold(), item["field"].casefold())
+        if key not in seen:
+            seen.add(key)
+            deduped.append(item)
+    return deduped
 
 
 def extract_structured_jd(jd_text: str) -> dict:

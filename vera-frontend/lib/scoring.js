@@ -35,10 +35,13 @@ export const STATUS_ICON = {
 };
 
 export function statusFor(finalScore) {
-  if (finalScore >= 87) return { key: "excellent", label: "Excellent Match" };
-  if (finalScore >= 82) return { key: "strong", label: "Strong Match" };
-  if (finalScore >= 72) return { key: "review", label: "Review" };
-  return { key: "low", label: "Below threshold" };
+  // Candidate status is deliberately based only on the final Job Fit score.
+  // The mandatory-skills gate remains visible as evidence, but does not change
+  // this recruiter-facing label.
+  if (finalScore >= 85) return { key: "excellent", label: "Excellent" };
+  if (finalScore >= 80) return { key: "strong", label: "Strong" };
+  if (finalScore >= 75) return { key: "review", label: "Review" };
+  return { key: "low", label: "Reject" };
 }
 
 export function initials(name) {
@@ -117,8 +120,9 @@ function mapSkillRow(r) {
   return {
     label: r.skill,
     status: r.status, // "matched" | "weak_match" | "missing"
-    detail: r.matched_against ? `matched against: ${r.matched_against}` : null,
+    detail: r.detail || (r.matched_against ? `matched against: ${r.matched_against}` : null),
     matchType: r.match_type, // "exact" | "evidence" | "none"
+    citations: r.citations || [],
   };
 }
 
@@ -149,15 +153,9 @@ export function evidenceSections(record) {
     educationItems = [{ label: "No education requirement in this job description", status: "matched", detail: "Not scored as a candidate qualification" }];
   } else if (ev.education && ev.education.length > 0) {
     educationItems = ev.education.map((e) => ({
-      label: [e.required_degree_level, e.required_field].filter(Boolean).join(" in ") || "Requirement",
+      label: [e.required_degree_level, e.required_field].filter(Boolean).join(" in ") || e.skill || e.requirement || "Education requirement",
       status: e.status, // "matched" or "missing"
       detail: e.status === "matched" ? "Satisfied by candidate degree" : "Not found in resume",
-    }));
-  } else if (record.education && record.education.length > 0) {
-    educationItems = record.education.map((e) => ({
-      label: [e.degree_level, e.field].filter(Boolean).join(" in ") || "Degree",
-      status: "matched",
-      detail: e.institution || "Extracted from resume",
     }));
   }
 
@@ -180,28 +178,105 @@ export function formatEducation(education) {
 export function explainRank(record, roleTitle) {
   const cs = record.category_scores || {};
   const missingMandatory = cs.mandatory_skills?.gate_missing || cs.mandatory_skills?.missing || [];
-  const sentences = [];
-
-  sentences.push(
-    `${record.candidate_name || "This candidate"} ranks #${record.rank} for ${roleTitle || "this role"} with a Job Fit score of ${record.final_score}%.`
-  );
+  const core = cs.mandatory_skills || {};
+  const evidence = record.evidence || {};
+  const title = evidence.job_title;
+  const lines = [
+    `#${record.rank} of this batch · ${record.final_score}% fit for ${roleTitle || "this role"}.`,
+  ];
 
   if (record.hard_gate_failed) {
-    sentences.push(record.hard_gate_reason || "Failed the mandatory-skills hard gate.");
-  } else if (missingMandatory.length === 0) {
-    sentences.push("All mandatory requirements are satisfied.");
-  } else {
-    sentences.push(`Missing ${missingMandatory.length} mandatory skill(s): ${missingMandatory.join(", ")}.`);
+    lines.push(record.hard_gate_reason || "A mandatory requirement was not met.");
+    return lines;
   }
 
-  if (cs.relevant_experience?.notes) {
-    sentences.push(cs.relevant_experience.notes.replace(/^./, (c) => c.toUpperCase()) + ".");
+  const experience = evidence.experience?.years;
+  const strengths = [];
+  const matchedCore = (core.matched || []).slice(0, 4);
+  const preferred = (cs.preferred_skills?.matched || []).slice(0, 2);
+  if (matchedCore.length) strengths.push(matchedCore.join(", "));
+  if (preferred.length) strengths.push(preferred.join(", "));
+  if (experience?.total_years_experience != null) {
+    strengths.push(`${experience.total_years_experience} years' experience`);
+  }
+  if (title?.best_match?.title) {
+    strengths.push(title.best_match.title);
+  }
+  if (strengths.length) lines.push(`Strengths: ${strengths.join(" · ")}.`);
+  const gaps = [
+    ...missingMandatory.slice(0, 2),
+    ...(cs.preferred_skills?.missing || []).slice(0, 2),
+  ];
+  lines.push(gaps.length ? `Gaps to verify: ${[...new Set(gaps)].join(", ")}.` : "No material gaps found in the scored requirements.");
+  return lines.slice(0, 3);
+}
+
+function uniqueLabels(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const value = typeof item === "string" ? item.trim() : "";
+    const key = value.toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * Build the full recruiter-facing candidate narrative from the persisted
+ * assessment. This is deliberately deterministic: every statement maps to a
+ * score, evidence status, or explicitly extracted resume fact.
+ */
+export function detailedCandidateSummary(record, roleTitle) {
+  const evidence = record.evidence || {};
+  const scores = record.category_scores || {};
+  const sections = evidenceSections(record);
+  const requirementRows = [
+    ...(evidence.mandatory_technical_skills || evidence.mandatory_skills || []),
+    ...(evidence.mandatory_domain_requirements || []),
+    ...(evidence.mandatory_role_specific_requirements || []),
+    ...(evidence.soft_skills || []),
+    ...(evidence.preferred_skills || []),
+  ];
+  const labelsFor = (status) => uniqueLabels(
+    requirementRows.filter((row) => row?.status === status).map((row) => row.skill || row.requirement)
+  );
+  const directStrengths = labelsFor("matched");
+  const relatedStrengths = labelsFor("weak_match");
+  const missingRequirements = labelsFor("missing");
+  const titleEvidence = sections.jobTitle;
+  const currentRole = titleEvidence?.best_match?.title
+    || record.current_role_title_from_summary
+    || record.experience?.find((entry) => entry?.title)?.title;
+  const experience = sections.experience?.years;
+  const titleScore = Number(scores.job_title_match?.score || 0);
+  const lines = [
+    `Overall fit: ranked #${record.rank} in this batch with a ${record.final_score}% fit for ${roleTitle || "the selected role"}.`,
+  ];
+
+  if (directStrengths.length) {
+    lines.push(`Directly evidenced strengths: ${directStrengths.join(", ")}.`);
+  }
+  if (relatedStrengths.length) {
+    lines.push(`Related or inferred evidence (partial credit; verify depth in interview): ${relatedStrengths.join(", ")}.`);
   }
 
-  if (cs.job_title_match?.notes) {
-    sentences.push(cs.job_title_match.notes + ".");
+  const gaps = [...missingRequirements];
+  if (titleScore === 0 && currentRole) gaps.push("job-title alignment");
+  if (experience?.status === "missing") gaps.push("minimum experience");
+  if (record.hard_gate_failed) {
+    lines.push(`Eligibility concern: ${record.hard_gate_reason || "mandatory-skill coverage did not meet the required threshold"}.`);
   }
+  if (gaps.length) lines.push(`Gaps or interview checks: ${uniqueLabels(gaps).join(", ")}.`);
+  else lines.push("Gaps or interview checks: no missing scored requirement was recorded.");
 
-  // Return the array directly instead of sentences.join(" ")
-  return sentences;
+  const additional = uniqueLabels(sections.additionalSkills || []);
+  if (additional.length) {
+    const remainder = Math.max(0, (sections.additionalSkillsTotal || additional.length) - additional.length);
+    lines.push(
+      `Additional candidate skills: ${additional.join(", ")}.`
+      + (remainder ? ` ${remainder} more additional extracted skill${remainder === 1 ? "" : "s"} are available in the evidence record.` : "")
+    );
+  }
+  return lines;
 }

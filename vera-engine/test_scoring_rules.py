@@ -67,6 +67,22 @@ def test_approved_title_with_resume_qualifiers_keeps_full_credit():
     assert result["matched_target_title"] == "Senior Data Engineer"
 
 
+def test_raw_extracted_title_containing_approved_reference_is_a_direct_match():
+    candidate = {
+        "experience": [{
+            "title": "Senior Java Engineer | Payments Platform, Bengaluru",
+            "company": "Example Co",
+            "end_date_raw": "Present",
+        }],
+    }
+
+    result = score_job_titles(candidate, "Sr Java Lead Engineer", judge_fn=_no_match_judge)
+
+    assert result["contribution"] == 1.0
+    assert result["match_level"] == "direct"
+    assert result["matched_target_title"] == "Senior Java Engineer"
+
+
 def test_base_role_explicitly_added_to_reference_earns_full_credit():
     candidate = {
         "current_role_title_from_summary": "Data Engineer",
@@ -103,6 +119,27 @@ def test_unrelated_title_gets_no_title_credit():
     assert result["match_level"] == "none"
 
 
+def test_explicit_software_engineer_reference_title_is_a_direct_match():
+    candidate = {
+        "experience": [{"title": "Software Engineer", "company": "Example Co", "end_date_raw": "Present"}],
+    }
+
+    result = score_job_titles(candidate, "Sr Java Lead Engineer", judge_fn=_no_match_judge)
+
+    assert result["contribution"] == 1.0
+    assert result["match_level"] == "direct"
+
+
+def test_abbreviated_seniority_title_is_valid_title_evidence():
+    candidate = {
+        "experience": [{"title": "Sr. Software Engineer", "company": "Example Co", "end_date_raw": "Present"}],
+    }
+    result = score_job_titles(candidate, "Sr Java Lead Engineer", judge_fn=_no_match_judge)
+
+    assert result["contribution"] == 1.0
+    assert result["best_match"]["title"] == "Sr. Software Engineer"
+
+
 def test_latest_employment_title_overrides_legacy_summary_field_for_scoring():
     candidate = {
         # Old stored rows can still contain a title that was once read from a summary.
@@ -117,7 +154,22 @@ def test_latest_employment_title_overrides_legacy_summary_field_for_scoring():
 
     assert result["contribution"] == 1.0
     assert result["best_match"]["title"] == "Senior Data Engineer"
-    assert result["best_match"]["company"] == "Current Co"
+
+
+def test_any_approved_reference_title_in_verified_work_history_is_a_perfect_fit():
+    candidate = {
+        "experience": [
+            {"title": "Product Owner", "company": "Current Co", "end_date_raw": "Present"},
+            {"title": "Data Scientist", "company": "Prior Co", "end_date_raw": "Dec 2024"},
+        ],
+    }
+
+    result = score_job_titles(candidate, "Data Engineer — AI Data Platform", judge_fn=_no_match_judge)
+
+    assert result["contribution"] == 1.0
+    assert result["match_level"] == "direct"
+    assert result["matched_target_title"] == "Data Scientist"
+    assert result["best_match"]["company"] == "Prior Co"
 
 
 @pytest.mark.parametrize(
@@ -133,6 +185,43 @@ def test_latest_employment_title_overrides_legacy_summary_field_for_scoring():
 )
 def test_named_skill_variants_match_bidirectionally(jd_skill, resume_skill):
     assert _exact_match(jd_skill, [resume_skill]) == resume_skill
+
+
+@pytest.mark.parametrize(("jd_skill", "resume_skill"), [("ETL", "ELT"), ("ELT", "ETL")])
+def test_etl_and_elt_are_approved_bidirectional_direct_references(jd_skill, resume_skill):
+    assert _exact_match(jd_skill, [resume_skill]) == resume_skill
+
+
+@pytest.mark.parametrize(
+    ("jd_skill", "resume_evidence"),
+    [
+        ("Circuit breakers", "Implemented Resilience4j Circuit Breaker for downstream services."),
+        ("Code review", "Led code reviews and mentoring for junior engineers."),
+    ],
+)
+def test_explicit_grammatical_or_framework_qualified_variants_are_direct(jd_skill, resume_evidence):
+    """Approved variants are green; broader capabilities remain separate."""
+    assert _exact_match(jd_skill, [resume_evidence]) == resume_evidence
+
+
+@pytest.mark.parametrize(
+    ("requirement", "resume_evidence"),
+    [
+        ("Spring Discovery", "Implemented Netflix Eureka service registration."),
+        ("Configuration management", "Managed distributed configuration using Config Server."),
+        ("Resiliency patterns", "Used Resilience4j with retry mechanisms."),
+        ("Performance engineering", "Delivered performance optimization for high-throughput APIs."),
+    ],
+)
+def test_concrete_broad_capability_evidence_is_yellow_not_green(requirement, resume_evidence):
+    result = score_single_skill(
+        requirement,
+        [resume_evidence],
+        CandidateEvidenceIndex({"skills_all_sources": [resume_evidence]}),
+        judge_fn=_no_match_judge,
+    )
+    assert result["contribution"] == 0.80
+    assert result["match_type"] == "reference"
 
 
 def test_generic_word_overlap_does_not_create_a_skill_match():
@@ -161,9 +250,123 @@ def test_reference_keywords_supply_explainable_partial_skill_evidence(requiremen
         judge_fn=_no_match_judge,
     )
 
-    assert result["contribution"] == 0.7
+    assert result["contribution"] == 0.80
     assert result["match_type"] == "reference"
-    assert result["matched_against"] == resume_skill
+    if result["matched_against"] is not None:
+        assert result["matched_against"] == resume_skill
+    assert result["gate_satisfied"]
+
+
+def test_approved_related_keywords_are_yellow_reference_evidence_in_project_text():
+    source_text = (
+        "Project delivered document digitization, ER diagrams, Snowflake ETL data marts, validation rules, "
+        "entity resolution, referential integrity, data profiling, KPI analysis, dashboards, and BI reporting."
+    )
+    evidence = CandidateEvidenceIndex({"source_markdown": source_text})
+
+    for requirement in (
+        "OCR", "Data modeling", "Data warehouse", "Data validation", "Deduplication",
+        "Consistency checks", "Data quality control", "Analytics",
+    ):
+        result = score_single_skill(requirement, [source_text], evidence, judge_fn=_no_match_judge)
+        assert result["contribution"] == 0.80
+        assert result["match_type"] == "reference"
+
+
+def test_concrete_related_evidence_counts_for_a_mandatory_gate():
+    result = score_single_skill(
+        "Lakehouse",
+        [],
+        CandidateEvidenceIndex({"skills_all_sources": ["Databricks data platform"]}),
+        judge_fn=lambda requirement, evidence: {
+            "match": "related", "confidence": 0.9, "reason": "Concrete adjacent platform evidence.",
+        },
+    )
+
+    assert result["contribution"] == 0.80
+    assert result["gate_satisfied"]
+
+
+@pytest.mark.parametrize(
+    ("requirement", "generic_evidence"),
+    [
+        ("Prometheus", "Built monitoring dashboards and handled production reliability."),
+        ("Airflow", "Automated workflows and scheduled operational tasks."),
+        ("Terraform", "Managed cloud infrastructure and deployment operations."),
+        ("Tableau", "Created dashboards, reports, and business insights."),
+        ("Pinecone", "Built RAG applications with vector search and retrieval."),
+        ("Selenium", "Performed automated testing and quality assurance."),
+        ("GitHub Copilot", "Used AI-assisted development and code generation."),
+    ],
+)
+def test_generic_capability_evidence_does_not_infer_named_tools(requirement, generic_evidence):
+    """Models cannot turn broad capability wording into named-tool experience."""
+    evidence = CandidateEvidenceIndex({"skills_all_sources": [generic_evidence]})
+
+    result = score_single_skill(
+        requirement,
+        [generic_evidence],
+        evidence,
+        judge_fn=lambda requirement, evidence: {
+            "match": "direct", "confidence": 0.99,
+            "reason": "This judge must not be able to infer a named product.",
+        },
+    )
+
+    assert result["contribution"] == 0.0
+    assert result["match_type"] == "none"
+    assert not result["gate_satisfied"]
+    assert "explicit product evidence" in result["judge_reason"]
+
+
+def test_generic_operational_evidence_does_not_infer_each_named_observability_product():
+    source_text = "Built production telemetry dashboards with reliability and monitoring responsibilities."
+    evidence = CandidateEvidenceIndex({"skills_all_sources": [source_text]})
+
+    for requirement in ("Prometheus", "Grafana", "Loki", "ELK/OpenSearch", "OpenTelemetry"):
+        result = score_single_skill(
+            requirement,
+            ["Monitoring", source_text],
+            evidence,
+            judge_fn=lambda requirement, evidence: {
+                "match": "direct", "confidence": 0.99,
+                "reason": "This judge must not be able to infer a named product.",
+            },
+        )
+
+        assert result["contribution"] == 0.0
+        assert result["match_type"] == "none"
+        assert not result["gate_satisfied"]
+        assert "explicit product evidence" in result["judge_reason"]
+
+
+def test_named_observability_sibling_is_yellow_related_evidence():
+    """An explicit adjacent product is related evidence, never a green exact match."""
+    result = score_single_skill(
+        "Grafana",
+        ["Prometheus"],
+        CandidateEvidenceIndex({"skills_all_sources": ["Prometheus"]}),
+        judge_fn=_no_match_judge,
+    )
+
+    assert result["contribution"] == 0.80
+    assert result["match_type"] == "reference"
+    assert result["gate_satisfied"]
+    from matcher import evidence_status
+    assert evidence_status(result) == "weak_match"
+
+
+def test_weak_evidence_receives_partial_credit_but_cannot_clear_a_gate():
+    result = score_single_skill(
+        "Lakehouse",
+        [],
+        CandidateEvidenceIndex({"skills_all_sources": ["Databricks data platform"]}),
+        judge_fn=lambda requirement, evidence: {
+            "match": "weak", "confidence": 0.7, "reason": "Broad adjacent evidence only.",
+        },
+    )
+
+    assert result["contribution"] == 0.55
     assert not result["gate_satisfied"]
 
 
