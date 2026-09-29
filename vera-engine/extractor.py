@@ -13,7 +13,7 @@ from pdf2image import convert_from_path
 import pytesseract
 
 from common import new_id, now_iso
-from experience import compute_total_years
+from experience import compute_total_years, latest_role_period
 from title_normalization import split_flattened_company_title
 
 logger = logging.getLogger("talentlens.extractor")
@@ -1452,6 +1452,7 @@ def ingest_resume(file_path: str) -> dict:
         structured["candidate_name"] = _candidate_name_from_filename(file_name)
 
     total_years, experience_warnings = compute_total_years(structured.get("experience", []))
+    structured["latest_role_period"] = latest_role_period(structured.get("experience", []))
     
     # NEW: Check if the summary explicitly stated a higher number of years
     stated_years = structured.get("stated_years_experience_from_summary", 0)
