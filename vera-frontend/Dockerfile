@@ -10,7 +10,7 @@ COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
 
 # NEXT_PUBLIC_* values are embedded into the browser bundle during this build.
-ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8001
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
 RUN npm run build
 
