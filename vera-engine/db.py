@@ -61,6 +61,7 @@ def init_db():
                 current_role_title_from_summary TEXT,
                 total_years_experience REAL,
                 experience TEXT,
+                latest_role_period TEXT,
                 education TEXT,
                 certifications TEXT,
                 projects TEXT,
@@ -169,6 +170,8 @@ def init_db():
             conn.execute("ALTER TABLE resumes ADD COLUMN skills_all_sources TEXT")
         if "current_role_title_from_summary" not in resume_cols:
             conn.execute("ALTER TABLE resumes ADD COLUMN current_role_title_from_summary TEXT")
+        if "latest_role_period" not in resume_cols:
+            conn.execute("ALTER TABLE resumes ADD COLUMN latest_role_period TEXT")
         if "skill_evidence" not in resume_cols:
             conn.execute("ALTER TABLE resumes ADD COLUMN skill_evidence TEXT")
         if "evidence_chunks" not in resume_cols:
@@ -269,14 +272,14 @@ def insert_resume(record: dict):
         conn.execute("""
             INSERT OR REPLACE INTO resumes
             (candidate_id, document_id, source_id, source_hash, source_markdown, source_bundle_version, candidate_name, skills, skills_all_sources, current_role_title_from_summary,
-             total_years_experience, experience, education, certifications, projects, skill_evidence, evidence_chunks, file_name, extraction_method,
+             total_years_experience, experience, latest_role_period, education, certifications, projects, skill_evidence, evidence_chunks, file_name, extraction_method,
              extraction_warnings, uploaded_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             record["candidate_id"], record["document_id"], record.get("source_id", ""), record.get("source_hash", ""), record.get("source_markdown", ""), record.get("source_bundle_version", ""), record.get("candidate_name", ""),
             _dumps(record.get("skills")), _dumps(record.get("skills_all_sources")),
             record.get("current_role_title_from_summary", ""), record.get("total_years_experience", 0),
-            _dumps(record.get("experience")), _dumps(record.get("education")),
+            _dumps(record.get("experience")), _dumps(record.get("latest_role_period")), _dumps(record.get("education")),
             _dumps(record.get("certifications")), _dumps(record.get("projects")), _dumps(record.get("skill_evidence")),
             _dumps(record.get("evidence_chunks")),
             record.get("file_name", ""), record.get("extraction_method", ""),
@@ -537,17 +540,19 @@ def update_candidate_name(candidate_id: str, candidate_name: str) -> dict | None
 
 def update_resume_role_facts(candidate_id: str, experience: list[dict], current_role_title: str) -> dict | None:
     """Persist deterministic role recovery from an already stored resume source."""
+    from experience import latest_role_period
+
     with _connect() as conn:
         updated = conn.execute(
-            "UPDATE resumes SET experience = ?, current_role_title_from_summary = ? WHERE candidate_id = ?",
-            (_dumps(experience), current_role_title, candidate_id),
+            "UPDATE resumes SET experience = ?, latest_role_period = ?, current_role_title_from_summary = ? WHERE candidate_id = ?",
+            (_dumps(experience), _dumps(latest_role_period(experience)), current_role_title, candidate_id),
         ).rowcount
     return get_resume_by_candidate_id(candidate_id) if updated else None
 
 
 def _row_to_resume_dict(row) -> dict:
     d = dict(row)
-    for field in ["skills", "skills_all_sources", "experience", "education", "certifications", "projects", "skill_evidence", "evidence_chunks", "extraction_warnings"]:
+    for field in ["skills", "skills_all_sources", "experience", "latest_role_period", "education", "certifications", "projects", "skill_evidence", "evidence_chunks", "extraction_warnings"]:
         d[field] = json.loads(d[field]) if d[field] else []
     return d
 
@@ -567,7 +572,7 @@ def get_scores_by_role(role_id: str) -> list[dict]:
         rows = conn.execute("""
             SELECT s.*, sr.audit_mode, r.candidate_name, r.file_name, r.source_id, r.skills, r.total_years_experience,
                    r.current_role_title_from_summary,
-                   r.experience, r.education, r.certifications, r.projects
+                   r.experience, r.latest_role_period, r.education, r.certifications, r.projects
             FROM scores s JOIN resumes r ON s.candidate_id = r.candidate_id
             LEFT JOIN screening_runs sr ON s.run_id = sr.run_id
             WHERE s.role_id = ? AND s.run_id = ?
@@ -584,7 +589,7 @@ def get_scores_by_role(role_id: str) -> list[dict]:
             d["audit_mode"] = bool(d["audit_mode"])
             # Raw extracted resume fields — needed for the candidate comparison table,
             # not just the computed scores.
-            for field in ["skills", "experience", "education", "certifications", "projects"]:
+            for field in ["skills", "experience", "latest_role_period", "education", "certifications", "projects"]:
                 d[field] = json.loads(d[field]) if d[field] else []
             results.append(d)
         return results
