@@ -2,6 +2,8 @@ import os
 import re
 import json
 import logging
+import tempfile
+import ollama
 
 import pymupdf as fitz  # PyMuPDF — `import fitz` directly is deprecated, `import pymupdf as fitz` is the current form
 import pymupdf4llm
@@ -13,7 +15,7 @@ from pdf2image import convert_from_path
 import pytesseract
 
 from common import new_id, now_iso
-from experience import compute_total_years
+from experience import compute_total_years, latest_role_period
 from title_normalization import split_flattened_company_title
 
 logger = logging.getLogger("talentlens.extractor")
@@ -1442,16 +1444,25 @@ def ingest_resume(file_path: str) -> dict:
     file_name = os.path.basename(file_path)
     raw_text, warnings, method = extract_text(file_path)
 
-    _debug_dump_path = os.path.join("/tmp", f"raw_text_debug__{file_name}.txt")
+    debug_dir = os.path.join(tempfile.gettempdir(), "VERA")
+    os.makedirs(debug_dir, exist_ok=True)
+
+    _debug_dump_path = os.path.join(
+        debug_dir,
+        f"raw_text_debug__{file_name}.txt"
+    )
+
     with open(_debug_dump_path, "w", encoding="utf-8") as _f:
         _f.write(f"[extraction_method={method}]\n[char_count={len(raw_text)}]\n\n{raw_text}")
-    print(f"[DEBUG] Stage 1 raw_text ({len(raw_text)} chars, method={method}) written to {_debug_dump_path}")
+
+    print(f"[DEBUG] Raw text saved to {_debug_dump_path}")
 
     structured = extract_structured_evidence(raw_text)
     if not structured.get("candidate_name"):
         structured["candidate_name"] = _candidate_name_from_filename(file_name)
 
     total_years, experience_warnings = compute_total_years(structured.get("experience", []))
+    structured["latest_role_period"] = latest_role_period(structured.get("experience", []))
     
     # NEW: Check if the summary explicitly stated a higher number of years
     stated_years = structured.get("stated_years_experience_from_summary", 0)
