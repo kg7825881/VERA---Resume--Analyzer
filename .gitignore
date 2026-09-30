@@ -48,6 +48,16 @@ vera-engine/storage/resumes/*
 vera-frontend/node_modules/
 vera-frontend/.next/
 
+# Desktop packaging output and generated runtime copies
+vera-desktop_windows/dist/
+vera-desktop_windows/node_modules/
+vera-desktop_windows/frontend-runtime/
+vera-desktop_windows/frontend-deps/
+vera-engine/build/
+vera-engine/dist/
+vera-engine/*.spec
+vera-engine/pyinstaller_hooks/__pycache__/
+
 # Local secrets and environment overrides
 .env
 .env.*
