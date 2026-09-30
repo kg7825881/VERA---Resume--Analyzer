@@ -1,4 +1,4 @@
-from workflow import cache_key, validate_analysis_request
+from analysis_workflow import cache_key, validate_analysis_request
 
 
 def test_cache_key_changes_when_scoring_evidence_changes():
