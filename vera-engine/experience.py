@@ -107,6 +107,60 @@ def _parse_date(raw: str):
         return None
 
 
+def latest_role_period(experience_entries: list) -> dict | None:
+    """Return the latest safely dated role and its calendar duration.
+
+    This is presentation data only: it never changes the total-experience
+    score.  A role is included only when both its start and end dates are
+    parseable; therefore the summary cannot make up a tenure for an ambiguous
+    resume date.  Current roles (for example, ``Present``) take precedence.
+    """
+    candidates = []
+    for index, entry in enumerate(experience_entries or []):
+        if not isinstance(entry, dict):
+            continue
+        start_raw = entry.get("start_date_raw") or ""
+        end_raw = entry.get("end_date_raw") or ""
+        start = _parse_date(start_raw)
+        end = _parse_date(end_raw)
+        if start is None or end is None or end < start:
+            continue
+        is_current = str(end_raw).strip().casefold() in PRESENT_KEYWORDS
+        candidates.append({
+            "index": index, "entry": entry, "start": start, "end": end,
+            "start_raw": start_raw, "end_raw": end_raw, "is_current": is_current,
+        })
+
+    if not candidates:
+        return None
+
+    latest = max(
+        candidates,
+        key=lambda item: (item["is_current"], item["end"], item["start"], -item["index"]),
+    )
+    months = (latest["end"].year - latest["start"].year) * 12 + latest["end"].month - latest["start"].month
+    if latest["end"].day < latest["start"].day:
+        months -= 1
+    months = max(0, months)
+    years, remaining_months = divmod(months, 12)
+    parts = []
+    if years:
+        parts.append(f"{years} year{'s' if years != 1 else ''}")
+    if remaining_months or not parts:
+        parts.append(f"{remaining_months} month{'s' if remaining_months != 1 else ''}")
+
+    entry = latest["entry"]
+    return {
+        "title": (entry.get("title") or "").strip(),
+        "company": (entry.get("company") or "").strip(),
+        "start_date_raw": latest["start_raw"],
+        "end_date_raw": latest["end_raw"],
+        "duration_months": months,
+        "duration_label": " ".join(parts),
+        "is_current": latest["is_current"],
+    }
+
+
 def compute_total_years(experience_entries: list) -> tuple:
     """
     experience_entries: the "experience" list from the Stage 2 JSON, each entry expected
