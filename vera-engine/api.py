@@ -38,7 +38,7 @@ from semantic_pipeline import create_semantic_session, finalize_semantic_session
 from cross_encoder import CrossEncoderMatcher
 from jd_policy import build_requirement_metadata, refresh_stale_requirement_metadata
 from feedback import validate_feedback
-from workflow import cache_key, validate_analysis_request
+from analysis_workflow import cache_key, validate_analysis_request
 
 # Ollama serves requests over HTTP, so ingestion/scoring calls are I/O-bound — a thread pool
 # lets several run concurrently even though each individual call is a normal blocking function.
