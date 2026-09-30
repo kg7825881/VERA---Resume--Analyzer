@@ -90,10 +90,91 @@ export function allMatchedSkills(record) {
   return [...new Set(pool)];
 }
 
-/** The candidate's most recent role (first entry in their experience list), or null. */
+const PRESENT_DATE_WORDS = new Set([
+  "present", "current", "currently", "ongoing", "now", "till date", "to date", "till now",
+]);
+
+const MONTHS = {
+  jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2,
+  apr: 3, april: 3, may: 4, jun: 5, june: 5, jul: 6, july: 6,
+  aug: 7, august: 7, sep: 8, sept: 8, september: 8, oct: 9, october: 9,
+  nov: 10, november: 10, dec: 11, december: 11,
+};
+
+function parseResumeMonth(raw, { endOfMonth = false } = {}) {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const value = raw.trim().replace(/\./g, "");
+  if (PRESENT_DATE_WORDS.has(value.toLowerCase())) return new Date();
+
+  let match = value.match(/^([A-Za-z]+)\s*[-/, ]\s*(\d{2,4})$/);
+  if (!match) {
+    const reversed = value.match(/^(\d{2,4})\s*[-/, ]\s*([A-Za-z]+)$/);
+    if (reversed) match = [reversed[0], reversed[2], reversed[1]];
+  }
+  if (match) {
+    const month = MONTHS[match[1].toLowerCase()];
+    let year = Number(match[2]);
+    if (month === undefined) return null;
+    if (year < 100) year += 2000;
+    return new Date(year, month + (endOfMonth ? 1 : 0), endOfMonth ? 0 : 1);
+  }
+
+  match = value.match(/^(\d{4})[-/](\d{1,2})$/);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]) - 1;
+    if (month < 0 || month > 11) return null;
+    return new Date(year, month + (endOfMonth ? 1 : 0), endOfMonth ? 0 : 1);
+  }
+
+  if (/^\d{4}$/.test(value)) {
+    const year = Number(value);
+    return new Date(year, endOfMonth ? 11 : 0, endOfMonth ? 31 : 1);
+  }
+  return null;
+}
+
+function durationLabel(start, end) {
+  let months = (end.getFullYear() - start.getFullYear()) * 12 + end.getMonth() - start.getMonth();
+  if (end.getDate() < start.getDate()) months -= 1;
+  months = Math.max(0, months);
+  const years = Math.floor(months / 12);
+  const remainingMonths = months % 12;
+  const pieces = [];
+  if (years) pieces.push(`${years} year${years === 1 ? "" : "s"}`);
+  if (remainingMonths || !pieces.length) pieces.push(`${remainingMonths} month${remainingMonths === 1 ? "" : "s"}`);
+  return pieces.join(" ");
+}
+
+/**
+ * Returns the latest dated role and a truthful calendar duration for it.
+ * Resume dates remain the display source; unparseable dates are never guessed.
+ */
 export function mostRecentRole(record) {
-  const experience = record.experience || [];
-  return experience.length > 0 ? experience[0] : null;
+  const candidates = (record.experience || []).map((role, index) => {
+    const startRaw = role?.start_date_raw || "";
+    const endRaw = role?.end_date_raw || "";
+    const start = parseResumeMonth(startRaw);
+    const ongoing = PRESENT_DATE_WORDS.has(String(endRaw).trim().toLowerCase());
+    const end = ongoing ? new Date() : parseResumeMonth(endRaw, { endOfMonth: true });
+    return { role, index, startRaw, endRaw, start, end, ongoing };
+  }).filter((item) => item.start && item.end && item.end >= item.start);
+
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => (
+    Number(b.ongoing) - Number(a.ongoing)
+    || b.end - a.end
+    || b.start - a.start
+    || a.index - b.index
+  ));
+  const latest = candidates[0];
+  return {
+    ...latest.role,
+    start_date_raw: latest.startRaw,
+    end_date_raw: latest.endRaw,
+    duration: durationLabel(latest.start, latest.end),
+    is_current: latest.ongoing,
+  };
 }
 
 /** Flat list across all skill-based categories for backward compatibility. */
@@ -248,11 +329,21 @@ export function detailedCandidateSummary(record, roleTitle) {
   const currentRole = titleEvidence?.best_match?.title
     || record.current_role_title_from_summary
     || record.experience?.find((entry) => entry?.title)?.title;
+  // New records carry this calculation from vera-engine. The browser fallback
+  // keeps older locally stored resumes useful until they are uploaded again.
+  const latestRole = record.latest_role_period || mostRecentRole(record);
   const experience = sections.experience?.years;
   const titleScore = Number(scores.job_title_match?.score || 0);
   const lines = [
     `Overall fit: ranked #${record.rank} in this batch with a ${record.final_score}% fit for ${roleTitle || "the selected role"}.`,
   ];
+
+  const latestRoleDuration = latestRole?.duration_label || latestRole?.duration;
+  if (latestRole?.title && latestRoleDuration) {
+    const employer = latestRole.company ? ` at ${latestRole.company}` : "";
+    const period = [latestRole.start_date_raw, latestRole.end_date_raw].filter(Boolean).join(" – ");
+    lines.push(`Most recent role: ${latestRole.title}${employer}${period ? ` (${period}; ${latestRoleDuration})` : ` (${latestRoleDuration})`}.`);
+  }
 
   if (directStrengths.length) {
     lines.push(`Directly evidenced strengths: ${directStrengths.join(", ")}.`);
