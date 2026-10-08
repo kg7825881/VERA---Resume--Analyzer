@@ -42,6 +42,9 @@ export default function ScreenPage() {
   const [auditMode, setAuditMode] = useState(false);
   const [semanticMode, setSemanticMode] = useState(false);
   const [semanticError, setSemanticError] = useState("");
+  const [editingResume, setEditingResume] = useState(null);
+  const [candidateNameDraft, setCandidateNameDraft] = useState("");
+ 
 
   const resumeInputRef = useRef(null);
   const stepTimerRef = useRef(null);
@@ -152,24 +155,41 @@ export default function ScreenPage() {
     setResumeResults((prev) => prev.filter((_, i) => i !== index));
   }
 
-  async function editQueuedCandidateName(index) {
+  function editQueuedCandidateName(index) {
     const candidate = resumeResults[index];
     if (!candidate?.candidate_id) return;
-    const enteredName = window.prompt(
-      "Candidate name (the original file name remains visible below)",
-      candidate.candidate_name || ""
-    );
-    if (enteredName === null) return;
-    const candidateName = enteredName.trim().replace(/\s+/g, " ");
+ 
+    setEditingResume({
+      index,
+      candidateId: candidate.candidate_id,
+    });
+    setCandidateNameDraft(candidate.candidate_name || "");
+  }
+ 
+  async function saveQueuedCandidateName(event) {
+    event.preventDefault();
+ 
+    const candidateName = candidateNameDraft.trim().replace(/\s+/g, " ");
     if (!candidateName) {
       toast("Enter a candidate name before saving.", "error");
       return;
     }
+ 
     try {
-      const saved = await updateCandidateName(candidate.candidate_id, candidateName);
-      setResumeResults((previous) => previous.map((item, itemIndex) => (
-        itemIndex === index ? { ...item, candidate_name: saved.candidate_name } : item
-      )));
+      const saved = await updateCandidateName(
+        editingResume.candidateId,
+        candidateName
+      );
+ 
+      setResumeResults((previous) =>
+        previous.map((item, itemIndex) =>
+          itemIndex === editingResume.index
+            ? { ...item, candidate_name: saved.candidate_name }
+            : item
+        )
+      );
+ 
+      setEditingResume(null);
       toast("Candidate name updated.", "success");
     } catch (err) {
       toast(`Couldn't update the candidate name: ${err.message}`, "error");
@@ -327,7 +347,7 @@ export default function ScreenPage() {
             <div className="ey">AI-powered recruitment workflow</div>
             <h1>Screen candidates in minutes.</h1>
             <p>
-              Upload one JD and a batch of resumes. VERA extracts requirements, understands
+              Upload one JD and a batch of resumes. GigaForce Resume Analyser extracts requirements, understands
               candidate experience, and produces an explainable ranking.
             </p>
           </div>
@@ -580,6 +600,34 @@ export default function ScreenPage() {
                     );
                   })}
                 </div>
+              </div>
+            )}
+            {editingResume && (
+              <div className="name-dialog-backdrop">
+                <form className="name-dialog" onSubmit={saveQueuedCandidateName}>
+                  <h3>Edit candidate name</h3>
+ 
+                  <label htmlFor="candidate-name">Candidate name</label>
+                  <input
+                      id="candidate-name"
+                      value={candidateNameDraft}
+                      onChange={(event) => setCandidateNameDraft(event.target.value)}
+                      autoFocus
+                  />
+ 
+                  <div className="name-dialog-actions">
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => setEditingResume(null)}
+                   >
+                      Cancel
+                    </button>
+                    <button type="submit" className="btn primary">
+                      Save name
+                    </button>
+                  </div>
+                </form>
               </div>
             )}
           </div>
