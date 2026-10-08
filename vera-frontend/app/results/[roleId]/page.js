@@ -29,6 +29,8 @@ export default function ResultsPage({ params }) {
   const [jdLoading, setJdLoading] = useState(true);
   const [jdExpanded, setJdExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [editingCandidate, setEditingCandidate] = useState(null);
+  const [candidateNameDraft, setCandidateNameDraft] = useState("");
 
   useEffect(() => {
     let cancelled = false;
@@ -86,21 +88,30 @@ export default function ResultsPage({ params }) {
     }
   }
 
-  async function editCandidateName(event, candidate) {
+  function editCandidateName(event, candidate) {
     event.stopPropagation();
-    const nextName = window.prompt("Candidate name", candidate.candidate_name || "");
-    if (nextName === null) return;
-    const candidateName = nextName.trim().replace(/\s+/g, " ");
+
+    setEditingCandidate(candidate);
+    setCandidateNameDraft(candidate.candidate_name || "");
+  }
+
+  async function saveCandidateName(event) {
+    event.preventDefault();
+
+    if (!editingCandidate) return;
+
+    const candidateName = candidateNameDraft.trim().replace(/\s+/g, " ");
     if (!candidateName) {
       toast("Enter a candidate name before saving.", "error");
       return;
     }
+
     try {
-      const saved = await updateCandidateName(candidate.candidate_id, candidateName);
+      const saved = await updateCandidateName(editingCandidate.candidate_id, candidateName);
       const current = state.resultsCache[roleId];
       if (current) {
         const replaceName = (items = []) => items.map((item) => (
-          item.candidate_id === candidate.candidate_id
+          item.candidate_id === editingCandidate.candidate_id
             ? { ...item, candidate_name: saved.candidate_name }
             : item
         ));
@@ -110,6 +121,7 @@ export default function ResultsPage({ params }) {
           excluded_hard_gate_failed: replaceName(current.excluded_hard_gate_failed),
         });
       }
+      setEditingCandidate(null);
       toast("Candidate name updated.", "success");
     } catch (err) {
       toast(`Couldn't update the candidate name: ${err.message}`, "error");
@@ -325,6 +337,33 @@ export default function ResultsPage({ params }) {
           </table>
         </div>
       </div>
+
+      {editingCandidate && (
+        <div className="name-dialog-backdrop">
+          <form className="name-dialog" onSubmit={saveCandidateName}>
+            <h3>Edit candidate name</h3>
+            <label htmlFor="ranking-candidate-name">Candidate name</label>
+            <input
+              id="ranking-candidate-name"
+              value={candidateNameDraft}
+              onChange={(event) => setCandidateNameDraft(event.target.value)}
+              autoFocus
+            />
+            <div className="name-dialog-actions">
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setEditingCandidate(null)}
+              >
+                Cancel
+              </button>
+              <button type="submit" className="btn primary">
+                Save name
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </section>
   );
 }
