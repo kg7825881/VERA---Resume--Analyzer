@@ -790,6 +790,54 @@ input {
   color: #ffb4c0;
 }
 
+/* Candidate-name dialog (replaces Electron-unsupported window.prompt). */
+.name-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(19, 34, 56, 0.35);
+}
+
+.name-dialog {
+  width: min(420px, 100%);
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--p);
+  box-shadow: 0 20px 50px rgba(19, 34, 56, 0.2);
+}
+
+.name-dialog h3 {
+  margin: 0 0 18px;
+}
+
+.name-dialog label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--m);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.name-dialog input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--t);
+  background: var(--p2);
+}
+
+.name-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
 /* --- Misc utility --- */
 
 .muted {
