@@ -77,7 +77,7 @@ async function startVera() {
     },
   });
 
-  await waitForService("http://127.0.0.1:8001/openapi.json");
+  await waitForService("http://127.0.0.1:8000/openapi.json");
   await waitForService("http://127.0.0.1:3000");
 
   const window = new BrowserWindow({
