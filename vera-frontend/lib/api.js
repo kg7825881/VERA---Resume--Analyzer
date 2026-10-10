@@ -3,6 +3,8 @@
 // All functions throw an Error with a readable message on non-2xx responses,
 // so callers can just try/catch and show err.message.
 
+import { adaptResultsResponse } from "./resultsAdapter";
+
 const BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 
 async function request(path, options = {}) {
@@ -169,20 +171,95 @@ export async function uploadResumes(files) {
  * Resolve a role query and score resumes against it.
  * candidateIds: pass the ids from the current upload batch, or omit to score every stored resume.
  */
-export function analyze(roleId, candidateIds) {
+export function analyze(roleId, candidateIds, { asyncMode = false, auditMode = false } = {}) {
   return request("/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       role_id: roleId,
       candidate_ids: candidateIds && candidateIds.length ? candidateIds : null,
+      async_mode: asyncMode,
+      audit_mode: auditMode,
     }),
   });
 }
 
+/** Fetch the lifecycle and per-candidate task state for one analysis run. */
+export function getRun(runId) {
+  return request(`/runs/${encodeURIComponent(runId)}`);
+}
+
+/** List recent analysis-run summaries, optionally limited to one role. */
+export function listRuns({ roleId, limit } = {}) {
+  const params = new URLSearchParams();
+  if (roleId) params.set("role_id", roleId);
+  if (limit) params.set("limit", String(limit));
+  const query = params.toString();
+  return request(`/runs${query ? `?${query}` : ""}`);
+}
+
 /** Fetch the full ranked list of scores (with category breakdowns) for a role. */
 export function getResults(roleId) {
-  return request(`/results/${encodeURIComponent(roleId)}`);
+  return request(`/results/${encodeURIComponent(roleId)}`).then(adaptResultsResponse);
+}
+
+/** Fetch the compact, versioned assessment for one scored JD/candidate pair. */
+export function getAssessment(roleId, candidateId) {
+  return request(
+    `/assessments/${encodeURIComponent(roleId)}/${encodeURIComponent(candidateId)}`
+  );
+}
+
+/** Submit one browser-local WebLLM ambiguity pass for server-side contract validation. */
+export function validateWebLLMAmbiguity(batch, response) {
+  return request("/webllm/ambiguity/validate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ batch, response: { judgments: response } }),
+  });
+}
+
+/** Start server-owned semantic sessions; each may request one local WebLLM batch. */
+export function startSemanticSessions(roleId, candidateIds) {
+  return request("/semantic-sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role_id: roleId, candidate_ids: candidateIds }),
+  });
+}
+
+export function getSemanticSession(sessionId) {
+  return request(`/semantic-sessions/${encodeURIComponent(sessionId)}`);
+}
+
+/** Submit browser-local judgments to the specific server-issued session. */
+export function submitSemanticJudgments(sessionId, judgments) {
+  return request(`/semantic-sessions/${encodeURIComponent(sessionId)}/webllm-judgments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ response: { judgments } }),
+  });
+}
+
+export function getRecruiterFeedback(roleId, candidateId) {
+  return request(`/feedback/${encodeURIComponent(roleId)}/${encodeURIComponent(candidateId)}`);
+}
+
+export function saveRecruiterFeedback(roleId, candidateId, feedback) {
+  return request(`/feedback/${encodeURIComponent(roleId)}/${encodeURIComponent(candidateId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(feedback),
+  });
+}
+
+/** Save a recruiter-corrected candidate name in the canonical resume record. */
+export function updateCandidateName(candidateId, candidateName) {
+  return request(`/candidates/${encodeURIComponent(candidateId)}/name`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ candidate_name: candidateName }),
+  });
 }
 
 export { BASE_URL };

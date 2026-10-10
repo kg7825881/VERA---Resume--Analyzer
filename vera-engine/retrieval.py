@@ -30,16 +30,90 @@ different problems and why this only touches the former.
 """
 
 import re
+from collections.abc import Callable
 
-from rank_bm25 import BM25Plus
+try:
+    from rank_bm25 import BM25Plus
+except ImportError:  # pragma: no cover - only for minimal local installs
+    class BM25Plus:
+        """Dependency-free lexical fallback; production uses rank-bm25."""
+
+        def __init__(self, corpus):
+            self.corpus = [set(document) for document in corpus]
+
+        def get_scores(self, query):
+            query_tokens = set(query)
+            return [float(len(query_tokens & document)) for document in self.corpus]
 
 from chunking import build_parent_child_chunks
+from embeddings import EMBED_MODEL, EMBED_MODEL_VERSION, cosine_similarity, embed_texts
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall((text or "").lower())
+
+
+def _lexical_overlap(query: str, text: str) -> float:
+    """A bounded lexical signal used only to break semantic-retrieval ties."""
+    query_tokens, text_tokens = set(_tokenize(query)), set(_tokenize(text))
+    return len(query_tokens & text_tokens) / len(query_tokens) if query_tokens else 0.0
+
+
+class SemanticEvidenceIndex:
+    """Candidate-isolated embedding retrieval with a small lexical blend.
+
+    It intentionally returns evidence only; cross-encoder/WebLLM decision
+    routing belongs to later slices. Vectors are batched and persisted by
+    ``embed_texts`` so every unchanged resume chunk is embedded only once per
+    model version.
+    """
+
+    def __init__(
+        self, candidate_data: dict, *, embedding_fn: Callable[[list[str]], list[list[float]]] | None = None,
+        model: str = EMBED_MODEL, model_version: str = EMBED_MODEL_VERSION,
+    ):
+        self.parents, _ = build_parent_child_chunks(candidate_data)
+        self.candidate_id = str(candidate_data.get("candidate_id") or "candidate-unknown")
+        self.model = model
+        self.model_version = model_version
+        self._embedding_fn = embedding_fn
+        self._vectors = embed_texts(
+            [parent.text for parent in self.parents], model=model, model_version=model_version,
+            embedding_fn=embedding_fn,
+        ) if self.parents else []
+
+    def retrieve(self, requirement: str, top_k: int = 3) -> list[dict]:
+        if top_k < 1 or not self.parents:
+            return []
+        query_vector = embed_texts(
+            [requirement], model=self.model, model_version=self.model_version,
+            embedding_fn=self._embedding_fn,
+        )[0]
+        ranked = []
+        for parent, vector in zip(self.parents, self._vectors):
+            semantic = cosine_similarity(query_vector, vector)
+            lexical = _lexical_overlap(requirement, parent.text)
+            # Semantic relevance is primary; lexical overlap provides a stable,
+            # explainable preference where similarities are close.
+            score = 0.85 * semantic + 0.15 * lexical
+            ranked.append((score, semantic, lexical, parent))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        results = []
+        for score, semantic, lexical, parent in ranked[:top_k]:
+            item = parent.to_dict()
+            if item["candidate_id"] != self.candidate_id:
+                raise ValueError("Evidence candidate isolation violation.")
+            item.update({
+                "semantic_similarity": round(float(semantic), 4),
+                "lexical_similarity": round(float(lexical), 4),
+                "retrieval_score": round(float(score), 4),
+                "retrieval_model": self.model,
+                "retrieval_model_version": self.model_version,
+            })
+            results.append(item)
+        return results
 
 
 class CandidateEvidenceIndex:

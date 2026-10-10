@@ -4,8 +4,8 @@ scorer.py — scoring engine implementing the simplified methodology:
     exact match is retrieved via BM25 (retrieval.py) and judged by a small local LLM
     (judge.py) into direct/related/weak/none, then converted to a numeric contribution
     by matcher.py — same pipeline preferred skills already use. A skill still needs to
-    clear GATE_MIN_CONTRIBUTION (currently only a "direct" judge match does) to satisfy
-    the hard mandatory-skill gate; a "related"/"weak" evidence match earns partial score
+    clear GATE_MIN_CONTRIBUTION (a "direct" or concrete "related" judge match does) to
+    satisfy the hard mandatory-skill gate; a "weak" evidence match earns partial score
     toward the category but does NOT by itself clear the gate.
   - Relevant Experience (20%): purely checks total_years >= JD min_years
   - Job Title Match (10%): the extracted current/latest employment title is compared
@@ -37,6 +37,7 @@ from job_title_matcher import score_job_titles
 from judge import judge_evidence
 from matcher import score_skill_list, evidence_status
 from retrieval import CandidateEvidenceIndex
+from education_matching import verified_education_entries
 
 WEIGHTS = {
     "mandatory_skills": 0.30,
@@ -189,7 +190,7 @@ def _score_education(candidate_data: dict, jd_data: dict) -> tuple[float, str, l
     If JD specifies education -> evaluates degrees & fields flexibly.
     """
     requirements = jd_data.get("education_requirements", [])
-    candidate_edu = candidate_data.get("education", [])
+    candidate_edu = verified_education_entries(candidate_data)
 
     # Case 1: No education required in JD -> Full score
     if not requirements:
@@ -327,7 +328,17 @@ def calculate_job_fit(candidate_data: dict, jd_data: dict, judge_fn=judge_eviden
     if validation_errors:
         raise ValueError(" ".join(validation_errors))
 
-    candidate_skills = candidate_data.get("skills_all_sources") or candidate_data.get("skills", [])
+    # Treat deterministic, word-bounded evidence from Skills, Projects, and
+    # Experience identically. Source markdown is verified resume content;
+    # keeping it here prevents an extractor from hiding a named capability
+    # merely because it appeared outside the Skills heading.
+    candidate_skills = list(candidate_data.get("skills_all_sources") or candidate_data.get("skills", []))
+    candidate_skills.extend(
+        item.get("skill", "") for item in (candidate_data.get("skill_evidence") or [])
+        if isinstance(item, dict) and isinstance(item.get("skill"), str)
+    )
+    if isinstance(candidate_data.get("source_markdown"), str):
+        candidate_skills.append(candidate_data["source_markdown"])
     evidence_index = CandidateEvidenceIndex(candidate_data)
 
     # --- Mandatory Skills (exact match earns free credit; otherwise evidence-based) ---

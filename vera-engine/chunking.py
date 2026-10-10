@@ -25,7 +25,36 @@ came from. matcher.py / judge.py need no changes: retrieve() still returns
 the same {"text", "source_type", "source_label", "bm25_score"} shape.
 """
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except ImportError:  # pragma: no cover - exercised only in minimal local installs
+    class RecursiveCharacterTextSplitter:
+        """Small dependency-free fallback for the optional LangChain splitter."""
+
+        def __init__(self, *, chunk_size: int, chunk_overlap: int, separators: list[str]):
+            self.chunk_size = chunk_size
+            self.chunk_overlap = chunk_overlap
+            self.separators = separators
+
+        def split_text(self, text: str) -> list[str]:
+            if len(text) <= self.chunk_size:
+                return [text]
+            chunks, start = [], 0
+            while start < len(text):
+                end = min(len(text), start + self.chunk_size)
+                if end < len(text):
+                    boundary = max((text.rfind(separator, start, end) for separator in self.separators if separator), default=-1)
+                    if boundary > start:
+                        end = boundary + 1
+                chunk = text[start:end].strip()
+                if chunk:
+                    chunks.append(chunk)
+                if end >= len(text):
+                    break
+                start = max(end - self.chunk_overlap, start + 1)
+            return chunks
+
+from common import EvidenceChunk
 
 # LangChain splitters work on characters, not tokens. This is a conservative
 # chars-per-token approximation for English text, used only to decide when a
@@ -49,16 +78,24 @@ class ParentChunk:
     """One whole experience/project/skills entry — never split further than
     this. parent_id ties every child back to exactly one of these."""
 
-    __slots__ = ("text", "source_type", "source_label", "parent_id")
+    __slots__ = ("text", "source_type", "source_label", "source_id", "parent_id", "evidence_id", "candidate_id", "page", "content_hash")
 
-    def __init__(self, text: str, source_type: str, source_label: str, parent_id: int):
-        self.text = text
-        self.source_type = source_type      # "experience" | "project" | "skills"
-        self.source_label = source_label    # e.g. "Data Engineer at Foo Corp"
+    def __init__(self, evidence: EvidenceChunk, parent_id: int):
+        self.text = evidence.text
+        self.source_type = evidence.section  # "experience" | "project" | "skills"
+        self.source_label = evidence.source_label or evidence.section.title()
+        self.source_id = evidence.source_id
         self.parent_id = parent_id
+        self.evidence_id = evidence.evidence_id
+        self.candidate_id = evidence.candidate_id
+        self.page = evidence.page
+        self.content_hash = evidence.content_hash
 
     def to_dict(self) -> dict:
-        return {"text": self.text, "source_type": self.source_type, "source_label": self.source_label}
+        return {"text": self.text, "source_type": self.source_type,
+                "source_label": self.source_label, "source_id": self.source_id,
+                "evidence_id": self.evidence_id, "candidate_id": self.candidate_id,
+                "page": self.page, "content_hash": self.content_hash}
 
 
 class ChildChunk:
@@ -72,12 +109,31 @@ class ChildChunk:
         self.parent_id = parent_id
 
 
-def _build_parents(candidate_data: dict) -> list[ParentChunk]:
-    """Reads the exact same structured fields retrieval.py's original
-    build_evidence_chunks did (experience/projects/skills) — only what
-    happens to each assembled entry afterward is different."""
-    parents: list[ParentChunk] = []
-    parent_id = 0
+def _chunk_id(candidate_id: str, section: str, label: str, text: str, page: int | None) -> str:
+    # EvidenceChunk calculates a full content hash; reuse that deterministic
+    # digest in an identifier that is stable for the same candidate/source text.
+    seed = "\x1f".join((candidate_id, section, label, text, str(page or "")))
+    import hashlib
+    return f"ev_{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _new_evidence(candidate_id: str, section: str, label: str, text: str, source_id: str, page: int | None = None) -> EvidenceChunk:
+    return EvidenceChunk(
+        evidence_id=_chunk_id(candidate_id, section, label, text, page), candidate_id=candidate_id,
+        section=section, text=text, page=page, source_id=source_id, source_label=label,
+    )
+
+
+def build_evidence_chunks(candidate_data: dict) -> list[EvidenceChunk]:
+    """Create stable, candidate-isolated evidence records from extracted fields.
+
+    Page data is optional because current DOCX/OCR extraction does not reliably
+    preserve it. A future page-aware extractor can populate ``page`` without
+    changing the evidence ID or retrieval contract shape.
+    """
+    chunks: list[EvidenceChunk] = []
+    candidate_id = str(candidate_data.get("candidate_id") or "candidate-unknown")
+    source_id = candidate_data.get("source_id") or candidate_data.get("document_id") or ""
 
     for entry in candidate_data.get("experience", []) or []:
         title = entry.get("title") or "unknown title"
@@ -93,8 +149,7 @@ def _build_parents(candidate_data: dict) -> list[ParentChunk]:
             parts.append("Tools/technologies used: " + ", ".join(techs))
         text = " ".join(parts).strip()
         if text:
-            parents.append(ParentChunk(text, "experience", label, parent_id))
-            parent_id += 1
+            chunks.append(_new_evidence(candidate_id, "experience", label, text, source_id, entry.get("page")))
 
     for proj in candidate_data.get("projects", []) or []:
         label = proj.get("title") or "unknown project"
@@ -106,15 +161,55 @@ def _build_parents(candidate_data: dict) -> list[ParentChunk]:
             parts.append("Tools/technologies used: " + ", ".join(techs))
         text = " ".join(parts).strip()
         if text:
-            parents.append(ParentChunk(text, "project", label, parent_id))
-            parent_id += 1
+            chunks.append(_new_evidence(candidate_id, "project", label, text, source_id, proj.get("page")))
 
     # Skills list stays one compact parent, same as before — it's already
     # atomic per-item, so there's no long-prose block here worth splitting.
     skills = candidate_data.get("skills_all_sources") or candidate_data.get("skills") or []
     if skills:
-        parents.append(ParentChunk(", ".join(skills), "skills", "Skills section", parent_id))
-        parent_id += 1
+        chunks.append(_new_evidence(candidate_id, "skills", "Skills section", ", ".join(skills), source_id))
+
+    for education in candidate_data.get("education", []) or []:
+        if not isinstance(education, dict):
+            continue
+        text = " in ".join(part.strip() for part in (
+            str(education.get("degree_level") or ""), str(education.get("field") or ""),
+        ) if part.strip())
+        institution = str(education.get("institution") or "").strip()
+        if institution:
+            text = f"{text}; {institution}" if text else institution
+        if text:
+            chunks.append(_new_evidence(candidate_id, "education", "Education", text, source_id, education.get("page")))
+
+    certifications = [value.strip() for value in candidate_data.get("certifications", []) or [] if isinstance(value, str) and value.strip()]
+    if certifications:
+        chunks.append(_new_evidence(candidate_id, "certifications", "Certifications", ", ".join(certifications), source_id))
+
+    return chunks
+
+
+def _evidence_from_persisted(candidate_data: dict) -> list[EvidenceChunk]:
+    chunks = []
+    for item in candidate_data.get("evidence_chunks", []) or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            chunks.append(EvidenceChunk(
+                evidence_id=item["evidence_id"], candidate_id=item["candidate_id"], section=item["section"],
+                text=item["text"], page=item.get("page"), source_id=item.get("source_id", ""),
+                content_hash=item.get("content_hash", ""), source_label=item.get("source_label", ""),
+            ))
+        except (KeyError, ValueError, TypeError):
+            # A malformed historic chunk must never contaminate retrieval. The
+            # deterministic fallback below rebuilds a safe corpus from fields.
+            return []
+    return chunks
+
+
+def _build_parents(candidate_data: dict) -> list[ParentChunk]:
+    """Load persisted chunks when available, otherwise build compatible ones."""
+    evidence_chunks = _evidence_from_persisted(candidate_data) or build_evidence_chunks(candidate_data)
+    parents = [ParentChunk(evidence, parent_id) for parent_id, evidence in enumerate(evidence_chunks)]
 
     return parents
 

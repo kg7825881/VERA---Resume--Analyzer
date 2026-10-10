@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { uploadJD, listJDs, uploadResumesStreaming, analyze, getResults, getJD } from "../../lib/api";
+import { uploadJD, listJDs, uploadResumesStreaming, analyze, getResults, getJD, getRun, startSemanticSessions, updateCandidateName } from "../../lib/api";
+import { resolveSemanticSession } from "../../lib/semanticRun";
 import { useAppState, useToast } from "../providers";
 import JDSummaryCard from "../../components/JDSummaryCard";
 
@@ -37,9 +38,14 @@ export default function ScreenPage() {
   const [activeStepIndex, setActiveStepIndex] = useState(-1); // -1 = idle
   const [doneSteps, setDoneSteps] = useState(new Set());
   const [statusText, setStatusText] = useState("Ready to analyze");
+  const [activeRun, setActiveRun] = useState(null);
+  const [auditMode, setAuditMode] = useState(false);
+  const [semanticMode, setSemanticMode] = useState(false);
+  const [semanticError, setSemanticError] = useState("");
 
   const resumeInputRef = useRef(null);
   const stepTimerRef = useRef(null);
+  const pollingStoppedRef = useRef(false);
 
   useEffect(() => {
     listJDs()
@@ -47,7 +53,10 @@ export default function ScreenPage() {
       .catch(() => {
         // library listing is a nice-to-have; ignore failure here, upload flow still works
       });
-    return () => clearInterval(stepTimerRef.current);
+    return () => {
+      clearInterval(stepTimerRef.current);
+      pollingStoppedRef.current = true;
+    };
   }, []);
 
   const successfulCandidates = resumeResults.filter((r) => r.status === "ok");
@@ -143,6 +152,30 @@ export default function ScreenPage() {
     setResumeResults((prev) => prev.filter((_, i) => i !== index));
   }
 
+  async function editQueuedCandidateName(index) {
+    const candidate = resumeResults[index];
+    if (!candidate?.candidate_id) return;
+    const enteredName = window.prompt(
+      "Candidate name (the original file name remains visible below)",
+      candidate.candidate_name || ""
+    );
+    if (enteredName === null) return;
+    const candidateName = enteredName.trim().replace(/\s+/g, " ");
+    if (!candidateName) {
+      toast("Enter a candidate name before saving.", "error");
+      return;
+    }
+    try {
+      const saved = await updateCandidateName(candidate.candidate_id, candidateName);
+      setResumeResults((previous) => previous.map((item, itemIndex) => (
+        itemIndex === index ? { ...item, candidate_name: saved.candidate_name } : item
+      )));
+      toast("Candidate name updated.", "success");
+    } catch (err) {
+      toast(`Couldn't update the candidate name: ${err.message}`, "error");
+    }
+  }
+
   function clearResumeBatch() {
     setResumeResults([]);
     setResumeFiles([]);
@@ -150,22 +183,27 @@ export default function ScreenPage() {
     if (resumeInputRef.current) resumeInputRef.current.value = "";
   }
 
-  function runStepAnimation() {
-    setDoneSteps(new Set());
-    setActiveStepIndex(0);
-    let i = 0;
-    clearInterval(stepTimerRef.current);
-    stepTimerRef.current = setInterval(() => {
-      setDoneSteps((prev) => {
-        const next = new Set(prev);
-        if (i > 0) next.add(STEPS[i - 1].key);
-        return next;
-      });
-      if (i < STEPS.length - 1) {
-        i += 1;
-        setActiveStepIndex(i);
-      }
-    }, 650);
+  function showRunProgress(run) {
+    const progress = run.progress || { total: run.candidate_count || 0, completed: 0, failed: 0, pending: 0 };
+    const finished = progress.completed + progress.failed;
+    const terminal = ["completed", "completed_with_errors", "failed"].includes(run.status);
+    if (terminal) {
+      setDoneSteps(new Set(STEPS.map((step) => step.key)));
+      setActiveStepIndex(STEPS.length - 1);
+      setStatusText(
+        progress.failed
+          ? `Analysis finished · ${progress.completed} scored · ${progress.failed} failed`
+          : `Analysis complete · ${progress.completed} candidate(s) ranked`
+      );
+    } else if (finished) {
+      setDoneSteps(new Set(["jd", "resumes", "matching"]));
+      setActiveStepIndex(3);
+      setStatusText(`Scoring ${finished}/${progress.total} candidate(s)…`);
+    } else {
+      setDoneSteps(new Set(["jd", "resumes"]));
+      setActiveStepIndex(2);
+      setStatusText(`Matching evidence for ${progress.total} candidate(s)…`);
+    }
   }
 
   async function handleRunAnalysis() {
@@ -179,17 +217,50 @@ export default function ScreenPage() {
     }
 
     setAnalyzing(true);
-    setStatusText(`Analyzing ${successfulCandidates.length} resume(s)…`);
-    runStepAnimation();
+    setActiveRun(null);
+    setSemanticError("");
+    pollingStoppedRef.current = false;
+    setDoneSteps(new Set(["jd", "resumes"]));
+    setActiveStepIndex(2);
+    setStatusText(`Starting analysis for ${successfulCandidates.length} resume(s)…`);
 
     const roleId = activeRole.role_id;
     const candidateIds = successfulCandidates.map((r) => r.candidate_id);
 
     try {
-      const result = await analyze(roleId, candidateIds);
+      if (semanticMode) {
+        setStatusText("Preparing semantic evidence for each candidate…");
+        const kickoff = await startSemanticSessions(roleId, candidateIds);
+        const completed = [];
+        for (let index = 0; index < kickoff.sessions.length; index += 1) {
+          const session = kickoff.sessions[index];
+          setActiveStepIndex(2);
+          setStatusText(`Semantic matching ${index + 1}/${kickoff.sessions.length} candidate(s)…`);
+          const resolved = await resolveSemanticSession(session, {
+            onProgress: (progress) => {
+              const detail = typeof progress?.text === "string" ? progress.text : "Loading local browser model…";
+              setStatusText(`Browser semantic model · ${detail}`);
+            },
+          });
+          if (resolved.status !== "completed") {
+            throw new Error(resolved.local_resolution?.reason || "Browser-local semantic matching was not completed.");
+          }
+          completed.push(resolved);
+          setDoneSteps(new Set(["jd", "resumes", "matching", "scoring"]));
+        }
+        setDoneSteps(new Set(STEPS.map((step) => step.key)));
+        setActiveStepIndex(STEPS.length - 1);
+        setStatusText(`Semantic analysis complete · ${completed.length} candidate(s) ranked`);
+        const full = await getResults(roleId);
+        setCurrentRole({ role_id: roleId, role_title: activeRole.role_title });
+        setBatch({ roleId, candidateIds, candidates: successfulCandidates });
+        setResultsForRole(roleId, { ...full, role_title: activeRole.role_title });
+        router.push(`/results/${roleId}`);
+        return;
+      }
+      const result = await analyze(roleId, candidateIds, { asyncMode: true, auditMode });
 
       if (result.status === "ambiguous") {
-        clearInterval(stepTimerRef.current);
         setAnalyzing(false);
         setActiveStepIndex(-1);
         setStatusText("Ready to analyze");
@@ -197,10 +268,34 @@ export default function ScreenPage() {
         return;
       }
 
-      clearInterval(stepTimerRef.current);
-      setDoneSteps(new Set(STEPS.map((s) => s.key)));
-      setActiveStepIndex(STEPS.length - 1);
-      setStatusText(`Analysis complete · ${candidateIds.length} candidate(s) ranked`);
+      if (result.status !== "accepted") {
+        throw new Error("The analysis run was not accepted.");
+      }
+
+      let run = {
+        ...result,
+        progress: { total: result.candidate_count, completed: 0, failed: 0, pending: result.candidate_count },
+        tasks: [],
+        audit_mode: auditMode,
+      };
+      setActiveRun(run);
+      showRunProgress(run);
+
+      while (!pollingStoppedRef.current) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        run = await getRun(result.run_id);
+        if (pollingStoppedRef.current) return;
+        setActiveRun(run);
+        showRunProgress(run);
+        if (["completed", "completed_with_errors", "failed"].includes(run.status)) break;
+      }
+
+      if (pollingStoppedRef.current) return;
+      setAnalyzing(false);
+      if (run.progress.completed === 0) {
+        toast("Analysis finished without any scored candidates. Review the failed tasks below.", "error");
+        return;
+      }
 
       setCurrentRole({ role_id: result.role_id, role_title: result.role_title });
       setBatch({
@@ -213,13 +308,14 @@ export default function ScreenPage() {
       const full = await getResults(result.role_id);
       setResultsForRole(result.role_id, { ...full, role_title: result.role_title });
 
-      setTimeout(() => router.push(`/results/${result.role_id}`), 500);
+      router.push(`/results/${result.role_id}`);
     } catch (err) {
-      clearInterval(stepTimerRef.current);
+      const message = err instanceof Error ? err.message : String(err || "Analysis failed.");
       setAnalyzing(false);
       setActiveStepIndex(-1);
-      setStatusText("Ready to analyze");
-      toast(err.message, "error");
+      setStatusText("Semantic analysis failed");
+      if (semanticMode) setSemanticError(message);
+      toast(message, "error");
     }
   }
 
@@ -356,11 +452,28 @@ export default function ScreenPage() {
               <div className="files">
                 {resumeResults.map((r, i) => (
                   <div className="file" key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                    <span>▧ {r.file_name}</span>
+                    <span style={{ minWidth: 0 }}>
+                      ▧ {r.candidate_name || r.file_name}
+                      {r.candidate_name && r.file_name && (
+                        <small style={{ display: "block", marginLeft: 18, color: "var(--muted)" }}>
+                          {r.file_name}
+                        </small>
+                      )}
+                    </span>
                     <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       <span style={{ color: r.status === "ok" ? "var(--a)" : "var(--r)", fontSize: 10 }}>
                         {r.status === "ok" ? "Ready" : r.error || "Failed"}
                       </span>
+                      {r.status === "ok" && r.candidate_id && (
+                        <button
+                          onClick={() => editQueuedCandidateName(i)}
+                          title="Edit candidate name"
+                          aria-label={`Edit candidate name for ${r.candidate_name || r.file_name}`}
+                          style={{ fontSize: 11, padding: "2px 8px" }}
+                        >
+                          Edit
+                        </button>
+                      )}
                       <button
                         onClick={() => removeResume(i)}
                         title="Remove from this batch"
@@ -384,7 +497,30 @@ export default function ScreenPage() {
         <div className="panel" style={{ marginTop: 18 }}>
           <div className="head">
             <h3>Live analysis pipeline</h3>
-            <span style={{ color: "var(--m)", fontSize: 11 }}>{statusText}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <label className="audit-toggle" title="Uses deterministic rules only and does not call the semantic judge">
+                <input
+                  type="checkbox"
+                  checked={auditMode}
+                  disabled={analyzing}
+                  onChange={(event) => {
+                    setAuditMode(event.target.checked);
+                    if (event.target.checked) setSemanticMode(false);
+                  }}
+                />
+                Deterministic audit mode
+              </label>
+              <label className="audit-toggle" title="Uses embeddings and a cross-encoder first, then asks WebLLM only about uncertain evidence pairs.">
+                <input
+                  type="checkbox"
+                  checked={semanticMode}
+                  disabled={analyzing || auditMode}
+                  onChange={(event) => setSemanticMode(event.target.checked)}
+                />
+                Browser semantic cascade
+              </label>
+              <span style={{ color: "var(--m)", fontSize: 11 }}>{statusText}</span>
+            </div>
           </div>
           <div className="body">
             <div className="process">
@@ -408,11 +544,44 @@ export default function ScreenPage() {
                 style={{
                   width:
                     activeStepIndex >= 0
-                      ? `${((doneSteps.size + (activeStepIndex >= 0 ? 1 : 0)) / STEPS.length) * 100}%`
+                      ? `${(Math.min(STEPS.length, doneSteps.size + 1) / STEPS.length) * 100}%`
                       : "0%",
                 }}
               />
             </div>
+            {semanticError && (
+              <div role="alert" style={{ marginTop: 14, border: "1px solid var(--r)", borderRadius: 8, padding: "10px 12px", color: "var(--r)", fontSize: 12 }}>
+                <b>Browser semantic matching failed.</b> {semanticError}
+              </div>
+            )}
+            {activeRun && (
+              <div className="run-progress" aria-live="polite">
+                <div className="run-progress-head">
+                  <span>Run {activeRun.run_id?.slice(0, 8)}</span>
+                  <span>
+                    {activeRun.audit_mode ? "Audit · " : ""}
+                    {activeRun.progress?.completed || 0}/{activeRun.progress?.total || 0} scored
+                    {activeRun.progress?.failed ? ` · ${activeRun.progress.failed} failed` : ""}
+                    {activeRun.performance?.elapsed_ms != null ? ` · ${(activeRun.performance.elapsed_ms / 1000).toFixed(1)}s` : ""}
+                  </span>
+                </div>
+                <div className="run-task-list">
+                  {activeRun.tasks?.map((task) => {
+                    const candidate = successfulCandidates.find((item) => item.candidate_id === task.candidate_id);
+                    return (
+                      <div className={`run-task ${task.status}`} key={task.candidate_id}>
+                        <span>{candidate?.candidate_name || candidate?.file_name || task.candidate_id}</span>
+                        <span>
+                          {task.status === "completed" && task.cache_hit ? "Completed · cached" : task.status}
+                          {task.duration_ms != null ? ` · ${(task.duration_ms / 1000).toFixed(1)}s` : ""}
+                          {task.error ? ` · ${task.error}` : ""}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </section>

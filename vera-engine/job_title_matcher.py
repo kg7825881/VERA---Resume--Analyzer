@@ -36,6 +36,37 @@ from title_normalization import normalize_employment_title
 
 STOPWORDS = {"the", "a", "an", "of", "and", "for"}
 
+# A title need not repeat the JD verbatim to be useful evidence. These groups
+# make that rule reusable across roles without giving unrelated functions
+# title credit merely because they share a seniority word such as "lead".
+_SENIORITY_WORDS = {"junior", "jr", "senior", "sr", "lead", "principal", "staff", "chief", "manager"}
+_ENGINEERING_ROLE_WORDS = {"engineer", "developer", "architect"}
+_GENERIC_ENGINEERING_WORDS = {
+    "software", "application", "applications", "backend", "frontend",
+    "fullstack", "full", "stack", "platform", "systems",
+}
+
+
+def _generic_title_family_match(candidate_title: str, target_title: str) -> str | None:
+    """Return a bounded related-title reason for compatible role families.
+
+    A ``Software Engineer`` can therefore support a specialised engineering
+    JD such as ``Sr Java Lead Engineer``. It is related evidence, not an exact
+    title match. Specific adjacent roles still belong in ROLE_TITLE_REFERENCE.
+    """
+    candidate_tokens = _tokenize(candidate_title)
+    target_tokens = _tokenize(target_title)
+    if not (candidate_tokens & _ENGINEERING_ROLE_WORDS and target_tokens & _ENGINEERING_ROLE_WORDS):
+        return None
+
+    role_words = _ENGINEERING_ROLE_WORDS | _SENIORITY_WORDS
+    substantive_shared = (candidate_tokens & target_tokens) - role_words
+    if substantive_shared:
+        return "Related engineering title family with shared role specialisation."
+    if candidate_tokens & _GENERIC_ENGINEERING_WORDS or target_tokens & _GENERIC_ENGINEERING_WORDS:
+        return "Related engineering title family; the resume uses a broader technical title than the JD."
+    return None
+
 # Approved title families supplied by the hiring workflow.  These are exact
 # acceptable alternatives for a JD's primary title, not broad synonym guesses:
 # a candidate earns full title credit only when their resolved latest title is
@@ -85,7 +116,7 @@ ROLE_TITLE_REFERENCE = {
     "Sr Java Lead Engineer": (
         "Java Technical Lead",
         "Senior Java Developer",
-        "Lead Software Engineer — Java",
+        "Lead Software Engineer",
         "Java Solutions Architect",
         "Backend Engineering Lead",
         "Senior Java Engineer",  
@@ -97,11 +128,15 @@ ROLE_TITLE_REFERENCE = {
         "Java Software Architect",  
         "Principal Java Engineer", 
         "Java Application Lead", 
-        "Senior Software Engineer – Java", 
-        "Lead Software Engineer – Java", 
+        "Senior Software Engineer",
+        "Lead Software Engineer",
         "Java Microservices Lead", 
         "Spring Boot Lead Developer", 
         "Full Stack Java Lead",
+        "Software Engineer",
+        "Java Developer",
+        "Java Engineer",
+        "Backend Engineer",
     ),
     "AI Engineer — GenAI Product Engineering": (
         "AI Engineer",
@@ -166,10 +201,27 @@ def _bounded_related_title(title: str, target_role_title: str) -> str | None:
 
 
 def _is_plausible_title(value: str) -> bool:
-    """Reject a resume-summary sentence accidentally extracted as a title."""
+    """Reject prose accidentally extracted as a title without rejecting abbreviations.
+
+    ``Sr. Software Engineer`` and ``S/W Engineer`` are normal, explicit
+    resume titles.  A full stop must therefore not invalidate title evidence;
+    sentence-like entries are controlled by bounded length, word count and a
+    required role noun instead.
+    """
     text = (value or "").strip()
     words = re.findall(r"[A-Za-z0-9+#.&/-]+", text)
-    return bool(text) and len(text) <= 100 and len(words) <= 12 and not re.search(r"[.;\n]", text)
+    return (
+        bool(text)
+        and len(text) <= 100
+        and 1 <= len(words) <= 12
+        and not re.search(r"[;\n]", text)
+        and bool(re.search(
+            r"\b(?:engineer|developer|scientist|analyst|manager|consultant|architect|"
+            r"specialist|designer|administrator|coordinator|owner|lead)\b",
+            text,
+            re.I,
+        ))
+    )
 
 
 def _tokenize(text: str) -> set:
@@ -308,20 +360,22 @@ def _collect_candidate_titles(candidate_data: dict) -> list[dict]:
 
     for entry in sorted(experience, key=recency, reverse=True):
         raw_title = (entry.get("title") or "").strip()
-        title = normalize_employment_title(raw_title)
-        if not title:
+        # Preserve the extracted title alongside its normalized form. A
+        # normalizer can fail to strip a company/location suffix, but that
+        # raw string can still contain an approved title verbatim.
+        title = normalize_employment_title(raw_title) or raw_title
+        if not _is_plausible_title(title):
             continue
         key = title.lower()
         if key in seen:
             continue
         seen.add(key)
-        titles.append({"title": title, "company": entry.get("company") or "unknown company"})
+        titles.append({"title": title, "raw_title": raw_title, "company": entry.get("company") or "unknown company"})
 
-    summary_title = normalize_employment_title(
-        (candidate_data.get("current_role_title_from_summary") or "").strip()
-    )
+    raw_summary_title = (candidate_data.get("current_role_title_from_summary") or "").strip()
+    summary_title = normalize_employment_title(raw_summary_title) or raw_summary_title
     if _is_plausible_title(summary_title) and summary_title.lower() not in seen:
-        titles.append({"title": summary_title, "company": "(resume headline)"})
+        titles.append({"title": summary_title, "raw_title": raw_summary_title, "company": "(resume headline)"})
         seen.add(summary_title.lower())
 
     return titles
@@ -344,6 +398,21 @@ def _target_titles(target_role_titles: str | list[str]) -> list[str]:
             seen.add(key)
             titles.append(title)
     return titles
+
+
+def _contains_title_phrase(extracted_title: str, approved_title: str) -> bool:
+    """Whether an extracted title contains an approved title as whole words.
+
+    This handles values such as ``Senior Java Engineer | Payments Platform``
+    without allowing a broad one-word label such as ``Engineer`` to turn any
+    engineering role into an exact match.
+    """
+    extracted = re.findall(r"[a-z0-9]+", (extracted_title or "").casefold())
+    approved = re.findall(r"[a-z0-9]+", (approved_title or "").casefold())
+    if len(approved) < 2 or len(approved) > len(extracted):
+        return False
+    width = len(approved)
+    return any(extracted[index:index + width] == approved for index in range(len(extracted) - width + 1))
 
 
 def score_job_titles(candidate_data: dict, target_role_titles: str | list[str], judge_fn=judge_evidence) -> dict:
@@ -375,8 +444,41 @@ def score_job_titles(candidate_data: dict, target_role_titles: str | list[str], 
         ), 3)}
         for t in titles
     ]
-    # Always score the current/latest title.  Older titles remain available for
-    # context but must not be presented as the candidate's current match.
+    # An approved reference title is recruiter-authorized evidence of a
+    # perfect title fit, wherever it appears in the candidate's verified work
+    # history.  This is intentionally different from a semantic related-title
+    # result: it is an explicit, maintained equivalence list for the role.
+    # Keep the matching title in the evidence so the recruiter can see why
+    # the score is 100%, even if the person has since taken a broader title.
+    for candidate_title in titles:
+        exact_reference = next(
+            (title for title in accepted_titles if _candidate_title_key(title) == _candidate_title_key(candidate_title["title"])),
+            None,
+        )
+        contained_reference = exact_reference or next(
+            (
+                title for title in accepted_titles
+                if any(_contains_title_phrase(value, title) for value in (
+                    candidate_title.get("raw_title", ""), candidate_title["title"],
+                ))
+            ),
+            None,
+        )
+        if contained_reference:
+            best_match = dict(candidate_title)
+            best_match.update({
+                "jaccard": round(max(_jaccard(tokens, _tokenize(candidate_title["title"])) for _, tokens in target_token_sets), 3),
+                "match_level": "direct",
+                "judge_reason": f"Approved reference title match: '{contained_reference}'.",
+            })
+            return {
+                "contribution": 1.0, "best_match": best_match, "status": "matched", "all_titles": all_titles,
+                "match_level": "direct", "judge_reason": best_match["judge_reason"],
+                "matched_target_title": contained_reference, "target_role_titles": accepted_titles,
+            }
+
+    # No approved reference title was found. Evaluate the current/latest role
+    # for bounded related-title evidence and, only then, semantic fallback.
     latest_title_dict = titles[0]
     latest_tokens = _tokenize(latest_title_dict["title"])
     best_target_title, target_tokens = max(
@@ -384,32 +486,42 @@ def score_job_titles(candidate_data: dict, target_role_titles: str | list[str], 
     )
     overlap = _jaccard(target_tokens, latest_tokens)
 
-    latest_title_key = _candidate_title_key(latest_title_dict["title"])
-    exact_target_title = next(
-        (title for title in accepted_titles if _candidate_title_key(title) == latest_title_key),
+    # A resume commonly omits a technology suffix (for example, "Senior
+    # Software Engineer" instead of the approved family title "Senior
+    # Software Engineer – Java").  This is a bounded family match: the
+    # candidate title must be the complete leading title phrase, never merely
+    # share a token such as "Engineer".
+    latest_title_tokens = re.findall(r"[a-z0-9]+", latest_title_dict["title"].casefold())
+    family_target = next((
+        title for title in accepted_titles
+        if len(latest_title_tokens) >= 2
+        and re.findall(r"[a-z0-9]+", title.casefold())[:len(latest_title_tokens)] == latest_title_tokens
+    ), None)
+    if family_target:
+        best_match = dict(latest_title_dict)
+        best_match.update({"jaccard": round(overlap, 3), "match_level": "related",
+                           "judge_reason": f"Current title is an approved title-family prefix of '{family_target}'."})
+        return {
+            "contribution": 0.8, "best_match": best_match, "status": "related", "all_titles": all_titles,
+            "match_level": "related", "judge_reason": best_match["judge_reason"],
+            "matched_target_title": family_target, "target_role_titles": accepted_titles,
+        }
+
+    # Apply the deterministic family policy before the semantic judge. This
+    # makes common title variance stable for every JD, rather than only for
+    # explicitly maintained role-reference entries.
+    generic_family_target = next(
+        (title for title in accepted_titles if _generic_title_family_match(latest_title_dict["title"], title)),
         None,
     )
-    if exact_target_title:
-        # Bypass the judge and return deterministic score
-        contribution = 1.0
-        match_level = "direct"
-        status = "matched"
-        judge_reason = f"Exact current-title match to accepted JD title: '{exact_target_title}'."
-        
+    if generic_family_target:
+        reason = _generic_title_family_match(latest_title_dict["title"], generic_family_target)
         best_match = dict(latest_title_dict)
-        best_match["jaccard"] = round(_jaccard(target_tokens, _tokenize(latest_title_dict["title"])), 3)
-        best_match["match_level"] = match_level
-        best_match["judge_reason"] = judge_reason
-        
+        best_match.update({"jaccard": round(overlap, 3), "match_level": "related", "judge_reason": reason})
         return {
-            "contribution": contribution,
-            "best_match": best_match,
-            "status": status,
-            "all_titles": all_titles,
-            "match_level": match_level,
-            "judge_reason": judge_reason,
-            "matched_target_title": exact_target_title,
-            "target_role_titles": accepted_titles,
+            "contribution": 0.8, "best_match": best_match, "status": "related", "all_titles": all_titles,
+            "match_level": "related", "judge_reason": reason,
+            "matched_target_title": generic_family_target, "target_role_titles": accepted_titles,
         }
 
     evidence_chunks = [{

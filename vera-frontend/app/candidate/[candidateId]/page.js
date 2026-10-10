@@ -3,17 +3,19 @@
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { getResults } from "../../../lib/api";
+import { getResults, getRecruiterFeedback, saveRecruiterFeedback } from "../../../lib/api";
 import { useAppState } from "../../providers";
 import Pill from "../../../components/Pill";
 import {
   statusFor,
   rankAll,
   evidenceSections,
-  explainRank,
+  detailedCandidateSummary,
   CATEGORY_MAX,
   CATEGORY_LABELS,
 } from "../../../lib/scoring";
+import { reviewSourcesForResult } from "../../../lib/resultsAdapter";
+import { generateAssessmentReviewWithFallback } from "../../../lib/webllm";
 
 export default function CandidateDetailPage({ params }) {
   return (
@@ -48,8 +50,22 @@ function EvidenceChip({ status, label, detail }) {
   const icon = STATUS_ICON[status] || "";
   return (
     <span className="tag" style={{ ...style, fontWeight: 600 }} title={detail || undefined}>
-      {icon} {label}
+      {icon} {label}{status === "weak_match" ? " · inferred" : ""}
     </span>
+  );
+}
+
+function EvidenceCitations({ citations }) {
+  if (!citations?.length) return null;
+  return (
+    <div className="evidence-citations">
+      {citations.map((citation, index) => (
+        <div className="evidence-quote" key={`${citation.sourceId}-${index}`}>
+          <span>{citation.sourceLabel}{citation.sourceId ? ` · ${citation.sourceId.slice(0, 12)}` : ""}</span>
+          <q>{citation.quote}</q>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -103,6 +119,11 @@ function CandidateDetail({ params }) {
   const [loading, setLoading] = useState(!state.resultsCache[roleId]);
   const [error, setError] = useState(null);
   const [summaryCopied, setSummaryCopied] = useState(false);
+  const [localReview, setLocalReview] = useState(null);
+  const [reviewing, setReviewing] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+  const [feedbackNote, setFeedbackNote] = useState("");
+  const [savingFeedback, setSavingFeedback] = useState(false);
 
   useEffect(() => {
     if (!roleId) return;
@@ -127,6 +148,22 @@ function CandidateDetail({ params }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roleId]);
+
+  useEffect(() => {
+    if (!roleId || !candidateId) return;
+    let cancelled = false;
+    getRecruiterFeedback(roleId, candidateId)
+      .then((value) => {
+        if (cancelled) return;
+        setFeedback(value);
+        setFeedbackNote(value.note || "");
+      })
+      .catch(() => {
+        // Feedback is optional; a scoring result remains usable when this
+        // non-critical read is unavailable.
+      });
+    return () => { cancelled = true; };
+  }, [roleId, candidateId]);
 
   const data = roleId ? state.resultsCache[roleId] : null;
   const all = useMemo(() => (data ? rankAll(data.ranked, data.excluded_hard_gate_failed) : []), [data]);
@@ -172,19 +209,54 @@ function CandidateDetail({ params }) {
 
   const status = statusFor(record.final_score);
   const sections = evidenceSections(record);
-  const explanation = explainRank(record, roleTitle);
+  const candidateSummary = detailedCandidateSummary(record, roleTitle);
   const ringGradient = `conic-gradient(var(--a) 0 ${record.final_score}%, #173047 ${record.final_score}%)`;
   const hasExperienceRequirement = Boolean(sections.experience.years);
-  const hasEducationRequirement = record.evidence?.education?.[0]?.status !== "not_required";
+  // Education is visible only when the JD actually included an education
+  // condition. Candidate education alone is context, not a scoring criterion.
+  const hasEducationRequirement = sections.education.length > 0;
   const candidateRole = sections.jobTitle?.best_match?.title || record.current_role_title_from_summary || "";
-  const copyRankingSummary = async () => {
-    const text = [`Why ranked #${record.rank}?`, "", ...explanation.map((item) => `• ${item}`)].join("\n");
+  const copyCandidateSummary = async () => {
+    const text = [`Candidate summary — ${record.candidate_name || "Unnamed candidate"}`, "", ...candidateSummary.map((item) => `• ${item}`)].join("\n");
     try {
       await copyToClipboard(text);
       setSummaryCopied(true);
       window.setTimeout(() => setSummaryCopied(false), 2000);
     } catch {
       setSummaryCopied(false);
+    }
+  };
+  const runLocalReview = async () => {
+    setReviewing(true);
+    try {
+      const response = await generateAssessmentReviewWithFallback({
+        assessment: {
+          jd: { id: roleId, title: roleTitle },
+          candidate: { id: record.candidate_id, name: record.candidate_name || "" },
+          assessment: {
+            score: record.final_score,
+            eligible: !record.hard_gate_failed,
+            decision_reason: record.hard_gate_reason || "",
+          },
+        },
+        sources: reviewSourcesForResult(record),
+      });
+      setLocalReview(response);
+    } finally {
+      setReviewing(false);
+    }
+  };
+  const saveFeedback = async (disposition) => {
+    setSavingFeedback(true);
+    try {
+      const saved = await saveRecruiterFeedback(roleId, candidateId, {
+        disposition,
+        note: feedbackNote,
+        score_snapshot: record.final_score,
+      });
+      setFeedback(saved);
+    } finally {
+      setSavingFeedback(false);
     }
   };
 
@@ -218,7 +290,7 @@ function CandidateDetail({ params }) {
             <span className="tag">Explainable</span>
           </div>
           <div className="body metrics">
-            {Object.entries(CATEGORY_MAX).filter(([key]) => !record.category_scores?.[key]?.not_applicable).map(([key, max]) => {
+            {Object.entries(CATEGORY_MAX).filter(([key]) => record.category_scores?.[key] && !record.category_scores[key]?.not_applicable).map(([key, max]) => {
               const category = record.category_scores?.[key] || {};
               const score = category.score ?? 0;
               const hasSkillCoverage = Number.isFinite(category.required_count);
@@ -227,9 +299,25 @@ function CandidateDetail({ params }) {
                 : Math.round((score / max) * 100);
               const summary = hasSkillCoverage
                 ? (category.not_required
-                  ? ""
-                  : `${pct}% (${category.matched_count}/${category.required_count})`)
+                  ? "100% (Not required)"
+                  : `${pct}% `)
                 : `${pct}%`;
+              const evidenceRows = Array.isArray(record.evidence?.[key]) ? record.evidence[key] : [];
+              // Older stored results predate named_* fields. Derive the same
+              // audit count from their individual evidence chips so a user
+              // does not need to re-run a completed screening just to see it.
+              const namedRequired = Number.isFinite(category.named_required_count)
+                ? category.named_required_count
+                : evidenceRows.length;
+              const namedMatched = Number.isFinite(category.named_matched_count)
+                ? category.named_matched_count
+                : evidenceRows.filter((row) => row.status === "matched").length;
+              const namedWeak = Number.isFinite(category.named_weak_count)
+                ? category.named_weak_count
+                : evidenceRows.filter((row) => row.status === "weak_match").length;
+              const namedSummary = namedRequired
+                ? `${namedMatched}/${namedRequired} named skills matched${namedWeak ? ` · ${namedWeak} related` : ""}`
+                : "";
               return (
                 <div className="metric" key={key}>
                   <small>{CATEGORY_LABELS[key] || key}</small>
@@ -239,6 +327,7 @@ function CandidateDetail({ params }) {
                   <strong>
                     {summary}
                   </strong>
+                  {namedSummary && <small>{namedSummary}</small>}
                 </div>
               );
             })}
@@ -250,8 +339,26 @@ function CandidateDetail({ params }) {
         <div className="panel">
           <div className="head">
             <h3>Evidence</h3>
+            <button className="btn ghost local-review-btn" disabled={reviewing} onClick={runLocalReview}>
+              {reviewing ? "Preparing local review…" : "Review locally"}
+            </button>
           </div>
           <div className="body">
+            {localReview && (
+              <div className={`local-review ${localReview.mode === "deterministic_fallback" ? "fallback" : ""}`}>
+                <div>
+                  <b>{localReview.mode === "webllm" ? "Local AI review" : "Deterministic fallback"}</b>
+                  <span>{localReview.review.recommendation}</span>
+                </div>
+                <p>{localReview.review.summary}</p>
+                {localReview.mode === "webllm" && (
+                  <small>
+                    Local model · {localReview.performance.initialization_ms} ms init · {localReview.performance.generation_ms} ms generation
+                  </small>
+                )}
+                {localReview.mode === "deterministic_fallback" && <small>{localReview.fallback_reason}</small>}
+              </div>
+            )}
             {/* Only JD requirement categories that contain criteria are shown. */}
             {sections.skillSections.map((section) => (
               <EvidenceSection
@@ -259,15 +366,21 @@ function CandidateDetail({ params }) {
                 key={section.key}
               >
                 {section.items.map((item, i) => (
-                  <EvidenceChip
-                    key={i}
-                    status={item.status}
-                    label={item.label}
-                    detail={
-                      item.detail ||
-                      (item.status === "missing" ? "Not found in resume evidence" : item.matchType)
-                    }
-                  />
+                  <div key={i} className="evidence-item">
+                    <EvidenceChip
+                      status={item.status}
+                      label={item.label}
+                      detail={
+                        item.detail ||
+                        (item.status === "weak_match"
+                          ? "Related evidence; 85% scoring credit. Verify the named skill in interview."
+                          : item.status === "missing"
+                          ? "No explicit evidence found in the resume."
+                          : "Explicit resume evidence.")
+                      }
+                    />
+                    <EvidenceCitations citations={item.citations} />
+                  </div>
                 ))}
               </EvidenceSection>
             ))}
@@ -345,12 +458,12 @@ function CandidateDetail({ params }) {
 
         <div className="panel">
           <div className="head">
-            <h3>Why ranked #{record.rank}?</h3>
+            <h3>Candidate summary</h3>
             <button
               type="button"
               className="btn"
-              onClick={copyRankingSummary}
-              aria-label="Copy ranking summary"
+              onClick={copyCandidateSummary}
+              aria-label="Copy candidate summary"
               style={{ padding: "7px 11px", fontSize: 12 }}
             >
               {summaryCopied ? "Copied" : "Copy"}
@@ -358,10 +471,44 @@ function CandidateDetail({ params }) {
           </div>
           <div className="body explain">
             <ul style={{ paddingLeft: "16px", margin: 0, textAlign: "left" }}>
-              {explanation.map((item, idx) => (
+              {candidateSummary.map((item, idx) => (
                 <li key={idx} style={{ marginBottom: "8px" }}>{item}</li>
               ))}
             </ul>
+            <div style={{ borderTop: "1px solid var(--line)", marginTop: 18, paddingTop: 16 }}>
+              <h4 style={{ margin: "0 0 8px" }}>Recruiter decision</h4>
+              <p className="muted" style={{ margin: "0 0 10px" }}>
+                Capture your decision for future evaluation. It does not change this score.
+              </p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {[
+                  ["shortlist", "Shortlist"],
+                  ["hold", "Hold"],
+                  ["reject", "Reject"],
+                ].map(([value, label]) => (
+                  <button
+                    className={`btn ${feedback?.disposition === value ? "primary" : "ghost"}`}
+                    disabled={savingFeedback}
+                    key={value}
+                    onClick={() => saveFeedback(value)}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <textarea
+                aria-label="Recruiter decision note"
+                value={feedbackNote}
+                onChange={(event) => setFeedbackNote(event.target.value)}
+                maxLength={2000}
+                placeholder="Optional note for this decision"
+                style={{ width: "100%", minHeight: 72, marginTop: 10, resize: "vertical" }}
+              />
+              {feedback?.disposition && (
+                <small className="muted">Saved as {feedback.disposition} · score snapshot {feedback.score_snapshot ?? record.final_score}</small>
+              )}
+            </div>
           </div>
         </div>
       </div>

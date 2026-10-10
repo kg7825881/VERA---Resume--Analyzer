@@ -1,0 +1,46 @@
+{
+  "name": "vera-desktop",
+  "version": "1.0.0",
+  "description": "VERA desktop resume-screening application",
+  "main": "main.cjs",
+  "type": "commonjs",
+  "scripts": {
+    "prepare:frontend": "node scripts/prepare-frontend-runtime.cjs",
+    "dist:mac": "npm run prepare:frontend && electron-builder --mac dmg --arm64"
+  },
+  "devDependencies": {
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.vera.resume.screening",
+    "productName": "VERA",
+    "files": [
+      "main.cjs"
+    ],
+    "extraResources": [
+      {
+        "from": "../vera-engine/dist/vera-api",
+        "to": "backend"
+      },
+      {
+        "from": "frontend-runtime",
+        "to": "frontend"
+      },
+      {
+        "from": "frontend-deps",
+        "to": "frontend-deps"
+      }
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    }
+  }
+}

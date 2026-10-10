@@ -36,6 +36,54 @@ def test_resume_extraction_is_repeatable_and_records_skill_evidence():
                for item in first["skill_evidence"])
 
 
+def test_name_extraction_rejects_skill_lists_project_headers_and_job_titles():
+    resume = """
+    § Databases: Cassandra, PostgreSQL, MySQL
+    PROJECT EXPERIENCE
+    Senior Software Engineer | Example Corp
+    KARTIK SHERAWAT
+    Technical Skills
+    Java, Spring Boot, Kafka
+    """
+
+    extracted = extract_structured_evidence(resume)
+
+    assert extracted["candidate_name"] == "KARTIK SHERAWAT"
+
+
+def test_title_date_pair_is_recovered_when_experience_heading_is_missing():
+    resume = """
+    SHIVANG SRIVASTAVA
+    Example Technologies Pvt Ltd
+    Sr. Software Engineer
+    Jan 2023 - Present
+    Built backend services.
+    Education
+    B.Tech in Computer Science
+    """
+    extracted = extract_structured_evidence(resume)
+
+    assert extracted["current_role_title_from_summary"] == "Sr. Software Engineer"
+    assert extracted["experience"][0]["title"] == "Sr. Software Engineer"
+
+
+def test_github_profile_is_distinct_from_github_copilot():
+    profile_resume = """
+    JANE DOE
+    LinkedIn | GitHub
+    Skills
+    GitHub Copilot, Git
+    """
+    copilot_only_resume = """
+    JOHN DOE
+    Skills
+    GitHub Copilot, Git
+    """
+
+    assert "GitHub" in extract_structured_evidence(profile_resume)["skills"]
+    assert "GitHub" not in extract_structured_evidence(copilot_only_resume)["skills"]
+
+
 def test_resume_specific_skills_do_not_need_to_exist_in_a_shared_dictionary():
     resume = """
     ALEX RAY

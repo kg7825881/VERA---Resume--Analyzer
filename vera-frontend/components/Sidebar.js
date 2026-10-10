@@ -7,6 +7,7 @@ import { useAppState } from "../app/providers";
 const ITEMS = [
   { href: "/screen", icon: "◈", label: "Screen Candidates", match: (p) => p.startsWith("/screen") },
   { href: "/results", icon: "▤", label: "Candidate Ranking", match: (p) => p.startsWith("/results") },
+  { href: "/shortlist", icon: "★", label: "Qualified Candidates", match: (p) => p.startsWith("/shortlist") },
   { href: "/candidate", icon: "◎", label: "Candidate Detail", match: (p) => p.startsWith("/candidate") },
 ];
 
@@ -15,7 +16,9 @@ export default function Sidebar() {
   const { state } = useAppState();
 
   function hrefFor(item) {
-    if (item.href === "/results" && state.currentRole) return `/results/${state.currentRole.role_id}`;
+    if ((item.href === "/results" || item.href === "/shortlist") && state.currentRole) {
+      return `${item.href}/${state.currentRole.role_id}`;
+    }
     return item.href;
   }
 

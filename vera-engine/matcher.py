@@ -34,14 +34,19 @@ scoring path — see embeddings.py.
 
 import re
 
+from capability_groups import (
+    explicit_capability_evidence,
+    partial_capability_evidence,
+    requires_named_tool_evidence,
+)
+from skill_aliases import explicit_skill_in_values
 from judge import judge_evidence
 from retrieval import CandidateEvidenceIndex
 
-# Minimum contribution a match must reach to satisfy a hard gate. Only
-# "direct" evidence (1.0) clears this bar — "related" (0.7) is deliberately
-# kept below it: a plausible-but-not-explicit match earns real partial score
-# toward a category, but shouldn't by itself silently satisfy a hard
-# mandatory-skill gate. Same intent as the old SEM_HIGH embedding band.
+# Minimum contribution a match must reach to satisfy a hard gate. A direct
+# match and a concrete related match both clear this bar. This deliberately
+# avoids requiring exact resume wording for a capability, while weak evidence
+# remains partial credit only and cannot satisfy a mandatory-skill gate.
 GATE_MIN_CONTRIBUTION = 0.8
 
 # How many BM25-retrieved evidence chunks to hand the judge per requirement.
@@ -58,8 +63,11 @@ DEFAULT_TOP_K = 3
 # preferred should ever weight evidence confidence differently.
 MATCH_LEVEL_CONTRIBUTION = {
     "direct": 1.0,
-    "related": 0.7,
-    "weak": 0.35,
+    # A deterministic reference phrase, capability-group signal, or model
+    # judgment is useful but is not the JD's exact named skill. Keep it
+    # visibly yellow and consistently below an approved alias/exact match.
+    "related": 0.80,
+    "weak": 0.55,
     "none": 0.0,
 }
 
@@ -90,10 +98,10 @@ EQUIVALENT_SKILLS = {
 }
 
 # Evidence phrases that can support a JD capability when the capability name
-# itself is absent. These are related (partial) matches, never substitutes for
-# explicit skills or mandatory-gate passes.
+# itself is absent. These are concrete related matches: they receive related
+# credit and can satisfy a mandatory gate, just as a related LLM judgment can.
 REFERENCE_SKILL_KEYWORDS = {
-    "ocr": {"document digitization", "text extraction", "image preprocessing", "layout analysis", "handwriting recognition", "pdf parsing", "document classification", "table extraction", "quality validation", "multilingual processing"},
+    "ocr": {"document digitization", "text extraction", "image preprocessing", "layout analysis", "handwriting recognition", "pdf parsing", "document classification", "table extraction", "quality validation", "multilingual processing", "PyMuPDF4LLM",},
     "retrieval datasets": {"knowledge corpus", "vector database", "document chunking", "metadata tagging", "relevance ranking", "semantic search", "hybrid retrieval", "data indexing", "source attribution", "retrieval evaluation"},
     "genai": {"large language models", "prompt engineering", "retrieval augmented generation", "fine tuning", "inference optimization", "content generation", "ai agents", "model evaluation", "guardrails", "responsible ai"},
     "dagster": {"data orchestration", "software defined assets", "pipeline scheduling", "asset lineage", "job execution", "data quality checks", "partition management", "resource configuration", "observability", "workflow automation"},
@@ -101,6 +109,12 @@ REFERENCE_SKILL_KEYWORDS = {
     "alerting": {"incident notification", "threshold alerts", "anomaly detection", "escalation policies", "alert routing", "severity classification", "on call management", "root cause analysis", "service level objectives", "alert fatigue reduction"},
     "monitoring": {"system health", "performance metrics", "log analysis", "infrastructure visibility", "application telemetry", "uptime tracking", "capacity planning", "error tracking", "distributed tracing", "operational dashboards"},
     "schema design": {"database modeling", "normalization", "entity relationships", "primary keys", "foreign keys", "data types", "index strategy", "constraints", "dimensional modeling", "schema evolution"},
+    "data modeling": {"database modeling", "dimensional modeling", "sql modeling", "data transformation", "entity relationships", "schema evolution"},
+    "data warehouse": {"warehouse optimization", "dimensional modeling", "etl pipeline", "etl pipelines", "data integration", "data marts"},
+    "lakehouse": {"databricks", "delta lake", "data lake", "lake storage", "medallion architecture"},
+    "data validation": {"data quality checks", "data testing", "quality validation", "data quality control", "data integrity checks"},
+    "data quality checks": {"data validation", "data testing", "quality validation", "data quality control", "data integrity checks"},
+    "data quality control": {"data validation", "data testing", "quality validation", "data quality checks", "data integrity checks"},
     "embedding pipelines": {"vector embeddings", "text chunking", "embedding models", "semantic indexing", "batch processing", "similarity search", "vector storage", "metadata enrichment", "embedding refresh", "retrieval optimization"},
 }
 
@@ -133,6 +147,15 @@ def _exact_match(required_skill: str, candidate_skills: list[str]) -> str | None
     """Returns the candidate skill string that satisfies an exact/word-boundary
     match, or None if there isn't one."""
     required_norm = _normalize(required_skill)
+
+    # Keep exact matching aligned with the approved alias registry used by
+    # the Browser Semantic pipeline.  The registry contains only spelling,
+    # grammatical, and recruiter-approved interchangeable variants, so this
+    # can award green only for genuinely explicit evidence (for example,
+    # "code reviews" for "Code review"), never for broad capability overlap.
+    approved_alias = explicit_skill_in_values(required_skill, candidate_skills)
+    if approved_alias is not None:
+        return approved_alias
 
     # 1. Direct equality & interchangeable term checks (e.g., ETL <-> ELT)
     for cand in candidate_skills:
@@ -204,6 +227,21 @@ def score_single_skill(
             "judge_reason": "",
         }
 
+    # Approved related phrases are deterministic resume evidence, but not the
+    # JD's exact named skill. Keep them as yellow reference evidence; only an
+    # exact term or approved interchangeable alias above is green.
+    direct_reason = explicit_capability_evidence(required_skill, set(candidate_skills))
+    if direct_reason:
+        return {
+            "skill": required_skill,
+            "contribution": MATCH_LEVEL_CONTRIBUTION["related"],
+            "match_type": "reference",
+            "gate_satisfied": MATCH_LEVEL_CONTRIBUTION["related"] >= GATE_MIN_CONTRIBUTION,
+            "matched_against": None,
+            "evidence": [],
+            "judge_reason": direct_reason,
+        }
+
     reference_match = _reference_keyword_match(required_skill, candidate_skills)
     if reference_match is not None:
         matched_against, reference_phrase = reference_match
@@ -211,18 +249,67 @@ def score_single_skill(
             "skill": required_skill,
             "contribution": MATCH_LEVEL_CONTRIBUTION["related"],
             "match_type": "reference",
-            "gate_satisfied": False,
+            "gate_satisfied": MATCH_LEVEL_CONTRIBUTION["related"] >= GATE_MIN_CONTRIBUTION,
             "matched_against": matched_against,
             "evidence": [],
             "judge_reason": f"Related capability evidence: '{reference_phrase}' supports '{required_skill}'.",
         }
 
+    # Capability-group evidence is intentionally separate from the approved
+    # direct vocabulary above: it remains yellow partial credit. It runs after
+    # the legacy reference lookup so the UI can continue to show the concrete
+    # phrase that triggered an existing yellow rule.
+    group_reason = partial_capability_evidence(required_skill, set(candidate_skills))
+    if group_reason:
+        return {
+            "skill": required_skill,
+            "contribution": MATCH_LEVEL_CONTRIBUTION["related"],
+            "match_type": "reference",
+            "gate_satisfied": MATCH_LEVEL_CONTRIBUTION["related"] >= GATE_MIN_CONTRIBUTION,
+            "matched_against": None,
+            "evidence": [],
+            "judge_reason": group_reason,
+        }
+
+    # A resume's generic capability language does not establish use of a
+    # specific product. Keep named tools red unless exact/approved evidence
+    # above supports them. The shared boundary is used by both Local Ollama
+    # and Browser Semantic replay.
+    if requires_named_tool_evidence(required_skill):
+        return {
+            "skill": required_skill,
+            "contribution": 0.0,
+            "match_type": "none",
+            "gate_satisfied": False,
+            "matched_against": None,
+            "evidence": [],
+            "judge_reason": (
+                "Named tooling requires explicit product evidence; generic capability "
+                "evidence is not sufficient."
+            ),
+        }
+
     evidence_chunks = evidence_index.retrieve(required_skill, top_k=top_k)
     judgment = judge_fn(required_skill, evidence_chunks)
     match_level = judgment["match"]
-    base_contribution = MATCH_LEVEL_CONTRIBUTION.get(match_level, 0.0)
+    # The model can classify evidence as highly convincing, but it is not
+    # permitted to manufacture a green named-skill match.  Exact terms and
+    # approved interchangeable aliases have already returned above.  Every
+    # model-mediated positive is therefore related evidence: yellow in the
+    # UI and 80% credit in both Local Ollama and Browser Semantic runs.
+    #
+    # This normalization belongs at the shared scorer boundary rather than
+    # inside either model prompt, so changing models cannot loosen the policy.
+    model_positive = match_level in {"direct", "related"}
+    normalized_match_level = "related" if model_positive else match_level
+    base_contribution = MATCH_LEVEL_CONTRIBUTION.get(normalized_match_level, 0.0)
     found_evidence = base_contribution > 0.0
     evidence_label = evidence_chunks[0]["source_label"] if (found_evidence and evidence_chunks) else None
+    judge_reason = judgment.get("reason", "")
+    if match_level == "direct":
+        judge_reason = (
+            f"{judge_reason} Model evidence is related; direct named-skill evidence was not found."
+        ).strip()
 
     if exact_only:
         # Evidence was found and judged (useful for the UI's "near miss" view),
@@ -235,7 +322,7 @@ def score_single_skill(
             "gate_satisfied": False,
             "matched_against": evidence_label,
             "evidence": evidence_chunks,
-            "judge_reason": judgment.get("reason", ""),
+            "judge_reason": judge_reason,
         }
 
     return {
@@ -245,7 +332,7 @@ def score_single_skill(
         "gate_satisfied": base_contribution >= GATE_MIN_CONTRIBUTION,
         "matched_against": evidence_label,
         "evidence": evidence_chunks,
-        "judge_reason": judgment.get("reason", ""),
+        "judge_reason": judge_reason,
     }
 
 
@@ -279,10 +366,15 @@ def score_skill_list(
 def evidence_status(result: dict) -> str:
     """
     Maps one score_single_skill result to a 3-state UI status for the evidence view.
-    Zero contribution (including near-miss evidence under exact_only) maps to "missing" (red).
+
+    Green is reserved for an exact term or an approved interchangeable alias.
+    Every positive non-exact result (capability group, reference phrase, or
+    model evidence) remains yellow, even when its 80% credit satisfies the
+    mandatory coverage gate.  This keeps the recruiter-visible color aligned
+    with the cross-engine scoring policy.
     """
     if result["contribution"] == 0.0:
         return "missing"
-    if not result["gate_satisfied"]:
+    if result.get("match_type") != "exact":
         return "weak_match"
     return "matched"

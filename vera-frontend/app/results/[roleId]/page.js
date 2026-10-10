@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getResults, listJDs, getJD, startNewScreening } from "../../../lib/api";
+import { getResults, listJDs, getJD, startNewScreening, updateCandidateName } from "../../../lib/api";
 import { useAppState, useToast } from "../../providers";
 import Pill from "../../../components/Pill";
 import { statusFor, initials, passesMandatory, rankAll, CATEGORY_MAX, CATEGORY_LABELS, mostRecentRole } from "../../../lib/scoring";
@@ -86,6 +86,36 @@ export default function ResultsPage({ params }) {
     }
   }
 
+  async function editCandidateName(event, candidate) {
+    event.stopPropagation();
+    const nextName = window.prompt("Candidate name", candidate.candidate_name || "");
+    if (nextName === null) return;
+    const candidateName = nextName.trim().replace(/\s+/g, " ");
+    if (!candidateName) {
+      toast("Enter a candidate name before saving.", "error");
+      return;
+    }
+    try {
+      const saved = await updateCandidateName(candidate.candidate_id, candidateName);
+      const current = state.resultsCache[roleId];
+      if (current) {
+        const replaceName = (items = []) => items.map((item) => (
+          item.candidate_id === candidate.candidate_id
+            ? { ...item, candidate_name: saved.candidate_name }
+            : item
+        ));
+        setResultsForRole(roleId, {
+          ...current,
+          ranked: replaceName(current.ranked),
+          excluded_hard_gate_failed: replaceName(current.excluded_hard_gate_failed),
+        });
+      }
+      toast("Candidate name updated.", "success");
+    } catch (err) {
+      toast(`Couldn't update the candidate name: ${err.message}`, "error");
+    }
+  }
+
   async function handleNewScreening() {
     try {
       await startNewScreening();
@@ -100,7 +130,9 @@ export default function ResultsPage({ params }) {
   const all = useMemo(() => (data ? rankAll(data.ranked, data.excluded_hard_gate_failed) : []), [data]);
   const scoreColumns = useMemo(
     () => Object.keys(CATEGORY_MAX).filter((key) =>
-      all.some((record) => !record.category_scores?.[key]?.not_applicable)
+      // A missing category means the JD did not define that criterion.  Do
+      // not render it as an invented zero-score column.
+      all.some((record) => record.category_scores?.[key] && !record.category_scores[key].not_applicable)
     ),
     [all]
   );
@@ -253,7 +285,17 @@ export default function ResultsPage({ params }) {
                       <div className="cand">
                         <div className="mini">{initials(r.candidate_name)}</div>
                         <div>
-                          <b>{r.candidate_name || "Unnamed candidate"}</b>
+                          <div className="candidate-name-row">
+                            <b>{r.candidate_name || "Unnamed candidate"}</b>
+                            <button
+                              className="candidate-name-edit"
+                              onClick={(event) => editCandidateName(event, r)}
+                              aria-label={`Edit name for ${r.candidate_name || "candidate"}`}
+                              title="Edit candidate name"
+                            >
+                              Edit
+                            </button>
+                          </div>
                           <small style={{ display: "block", color: "#7189a0", marginTop: "2px" }}>
                             {mostRecentRole(r) 
                               ? `${mostRecentRole(r).title} @ ${mostRecentRole(r).company}` 
